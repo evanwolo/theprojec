@@ -1,0 +1,4 @@
+/home/runner/work/theprojec/theprojec/_codeql_build_dir/CMakeFiles/KernelSim.dir
+/home/runner/work/theprojec/theprojec/_codeql_build_dir/CMakeFiles/OpinionSim.dir
+/home/runner/work/theprojec/theprojec/_codeql_build_dir/CMakeFiles/edit_cache.dir
+/home/runner/work/theprojec/theprojec/_codeql_build_dir/CMakeFiles/rebuild_cache.dir
