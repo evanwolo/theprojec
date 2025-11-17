@@ -91,7 +91,16 @@ private:
     // Helper functions
     double languageQuality(const Agent& i, const Agent& j) const;
     double similarityGate(const Agent& i, const Agent& j) const;
-    double fastTanh(double x) const { return std::tanh(x); }
+    
+    // Fast tanh approximation for performance (accurate in [-3, 3])
+    inline double fastTanh(double x) const {
+        // Clamp to avoid overflow
+        if (x < -3.0) return -1.0;
+        if (x > 3.0) return 1.0;
+        // Rational approximation: tanh(x) ≈ x * (27 + x²) / (27 + 9*x²)
+        const double x2 = x * x;
+        return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+    }
 };
 
 #endif

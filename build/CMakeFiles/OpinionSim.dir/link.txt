@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -march=native -DNDEBUG -Wl,--dependency-file=CMakeFiles/OpinionSim.dir/link.d CMakeFiles/OpinionSim.dir/src/BeliefTypes.cpp.o CMakeFiles/OpinionSim.dir/src/Individual.cpp.o CMakeFiles/OpinionSim.dir/src/Network.cpp.o CMakeFiles/OpinionSim.dir/src/Simulation.cpp.o CMakeFiles/OpinionSim.dir/src/Snapshot.cpp.o CMakeFiles/OpinionSim.dir/src/main.cpp.o -o OpinionSim

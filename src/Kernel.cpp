@@ -66,7 +66,12 @@ void Kernel::buildSmallWorld() {
     std::uniform_real_distribution<double> uniDist(0.0, 1.0);
     std::uniform_int_distribution<std::uint32_t> nodeDist(0, N - 1);
     
-    // Ring lattice
+    // Reserve space to avoid reallocations
+    for (auto& agent : agents_) {
+        agent.neighbors.reserve(K);
+    }
+    
+    // Ring lattice - build only forward edges, avoid duplicates
     for (std::uint32_t i = 0; i < N; ++i) {
         for (std::uint32_t d = 1; d <= halfK; ++d) {
             std::uint32_t j = (i + d) % N;
@@ -75,26 +80,36 @@ void Kernel::buildSmallWorld() {
         }
     }
     
-    // Rewiring
+    // Rewiring - optimize to avoid repeated set construction
     for (std::uint32_t i = 0; i < N; ++i) {
+        // Build set once per agent
         std::unordered_set<std::uint32_t> current(agents_[i].neighbors.begin(), 
                                                     agents_[i].neighbors.end());
+        
         for (std::uint32_t d = 1; d <= halfK; ++d) {
             if (uniDist(rng_) < cfg_.rewireProb) {
                 std::uint32_t oldJ = (i + d) % N;
                 
-                // Remove old edge
+                // Only rewire if edge still exists
+                if (current.count(oldJ) == 0) continue;
+                
+                // Find new target (with iteration limit to avoid infinite loop)
+                std::uint32_t newJ;
+                int attempts = 0;
+                const int maxAttempts = N * 2;
+                do {
+                    newJ = nodeDist(rng_);
+                    if (++attempts > maxAttempts) break;
+                } while (newJ == i || current.count(newJ));
+                
+                if (attempts > maxAttempts) continue;
+                
+                // Remove old edge from both sides
                 auto& niNbrs = agents_[i].neighbors;
                 auto& njNbrs = agents_[oldJ].neighbors;
                 niNbrs.erase(std::remove(niNbrs.begin(), niNbrs.end(), oldJ), niNbrs.end());
                 njNbrs.erase(std::remove(njNbrs.begin(), njNbrs.end(), i), njNbrs.end());
                 current.erase(oldJ);
-                
-                // Find new target
-                std::uint32_t newJ;
-                do {
-                    newJ = nodeDist(rng_);
-                } while (newJ == i || current.count(newJ));
                 
                 // Add new edge
                 agents_[i].neighbors.push_back(newJ);
@@ -104,10 +119,11 @@ void Kernel::buildSmallWorld() {
         }
     }
     
-    // Deduplicate and remove self-loops
+    // Deduplicate and remove self-loops (final cleanup)
     for (auto& agent : agents_) {
         std::unordered_set<std::uint32_t> unique;
         std::vector<std::uint32_t> cleaned;
+        cleaned.reserve(agent.neighbors.size());
         for (auto nid : agent.neighbors) {
             if (nid != agent.id && unique.insert(nid).second) {
                 cleaned.push_back(nid);
@@ -147,33 +163,46 @@ void Kernel::updateBeliefs() {
     // Compute deltas in parallel-friendly way
     std::vector<std::array<double, 4>> dx(agents_.size());
     
-    for (std::size_t i = 0; i < agents_.size(); ++i) {
+    const std::size_t n = agents_.size();
+    const double stepSize = cfg_.stepSize;
+    
+    for (std::size_t i = 0; i < n; ++i) {
         const auto& ai = agents_[i];
         std::array<double, 4> acc{0, 0, 0, 0};
+        
+        // Cache agent properties used in inner loop
+        const double ai_susceptibility = ai.m_susceptibility;
+        const double ai_comm = ai.m_comm;
         
         for (auto jid : ai.neighbors) {
             const auto& aj = agents_[jid];
             
             double s = similarityGate(ai, aj);
             double lq = languageQuality(ai, aj);
-            double comm = 0.5 * (ai.m_comm + aj.m_comm);
-            double weight = cfg_.stepSize * s * lq * comm * ai.m_susceptibility;
+            double comm = 0.5 * (ai_comm + aj.m_comm);
+            double weight = stepSize * s * lq * comm * ai_susceptibility;
             
-            for (int k = 0; k < 4; ++k) {
-                double diff = aj.B[k] - ai.B[k];
-                acc[k] += weight * fastTanh(diff);
-            }
+            // Unroll belief dimension loop for better performance
+            acc[0] += weight * fastTanh(aj.B[0] - ai.B[0]);
+            acc[1] += weight * fastTanh(aj.B[1] - ai.B[1]);
+            acc[2] += weight * fastTanh(aj.B[2] - ai.B[2]);
+            acc[3] += weight * fastTanh(aj.B[3] - ai.B[3]);
         }
         
         dx[i] = acc;
     }
     
     // Apply updates
-    for (std::size_t i = 0; i < agents_.size(); ++i) {
-        for (int k = 0; k < 4; ++k) {
-            agents_[i].x[k] += dx[i][k];
-            agents_[i].B[k] = fastTanh(agents_[i].x[k]);
-        }
+    for (std::size_t i = 0; i < n; ++i) {
+        agents_[i].x[0] += dx[i][0];
+        agents_[i].x[1] += dx[i][1];
+        agents_[i].x[2] += dx[i][2];
+        agents_[i].x[3] += dx[i][3];
+        
+        agents_[i].B[0] = fastTanh(agents_[i].x[0]);
+        agents_[i].B[1] = fastTanh(agents_[i].x[1]);
+        agents_[i].B[2] = fastTanh(agents_[i].x[2]);
+        agents_[i].B[3] = fastTanh(agents_[i].x[3]);
     }
 }
 

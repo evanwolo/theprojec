@@ -2,6 +2,7 @@
 #include <sstream>
 #include <iomanip>
 
+[[maybe_unused]]
 static void appendEsc(std::ostream& os, const std::string& s) {
   os << '"';
   for (char c : s) {

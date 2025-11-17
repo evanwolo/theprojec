@@ -38,8 +38,13 @@ void KMeansClustering::initialize(const std::vector<Agent>& agents,
         std::vector<double> minDists(agents.size(), std::numeric_limits<double>::max());
         for (std::size_t i = 0; i < agents.size(); ++i) {
             for (const auto& c : centroids) {
-                double d = distance4d(agents[i].B, c);
-                if (d < minDists[i]) minDists[i] = d;
+                // Use squared distance to avoid sqrt
+                double d2 = 0.0;
+                for (int dim = 0; dim < 4; ++dim) {
+                    double diff = agents[i].B[dim] - c[dim];
+                    d2 += diff * diff;
+                }
+                if (d2 < minDists[i]) minDists[i] = d2;
             }
         }
         std::discrete_distribution<std::size_t> dist(minDists.begin(), minDists.end());
@@ -52,12 +57,17 @@ void KMeansClustering::assign(const std::vector<Agent>& agents,
                               std::vector<int>& assignment) {
     assignment.resize(agents.size());
     for (std::size_t i = 0; i < agents.size(); ++i) {
-        double best = std::numeric_limits<double>::max();
+        double bestSq = std::numeric_limits<double>::max();
         int bestCluster = 0;
+        // Compare squared distances to avoid sqrt
         for (int k = 0; k < k_; ++k) {
-            double d = distance4d(agents[i].B, centroids[k]);
-            if (d < best) {
-                best = d;
+            double d2 = 0.0;
+            for (int dim = 0; dim < 4; ++dim) {
+                double diff = agents[i].B[dim] - centroids[k][dim];
+                d2 += diff * diff;
+            }
+            if (d2 < bestSq) {
+                bestSq = d2;
                 bestCluster = k;
             }
         }
@@ -149,10 +159,18 @@ DBSCANClustering::DBSCANClustering(double eps, int minPts)
 std::vector<std::uint32_t> DBSCANClustering::regionQuery(const std::vector<Agent>& agents,
                                                          std::uint32_t idx) const {
     std::vector<std::uint32_t> neighbors;
-    neighbors.reserve(32);
+    neighbors.reserve(minPts_ * 2);  // Reserve reasonable space
     const auto& point = agents[idx].B;
+    const double eps2 = eps_ * eps_;  // Compare squared distances to avoid sqrt
+    
     for (std::uint32_t i = 0; i < agents.size(); ++i) {
-        if (distance4d(point, agents[i].B) <= eps_) {
+        // Compute squared distance
+        double d2 = 0.0;
+        for (int k = 0; k < 4; ++k) {
+            double diff = point[k] - agents[i].B[k];
+            d2 += diff * diff;
+        }
+        if (d2 <= eps2) {
             neighbors.push_back(i);
         }
     }

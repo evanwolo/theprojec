@@ -33,7 +33,8 @@ void Simulation::initPopulation() {
   people_.reserve(cfg_.population);
   for (std::uint32_t i = 0; i < cfg_.population; ++i) {
     int cluster = static_cast<int>(U(rng) * 4.0);
-    if (cluster < 0) cluster = 0; if (cluster > 3) cluster = 3;
+    if (cluster < 0) cluster = 0;
+    if (cluster > 3) cluster = 3;
     BeliefVec b = jittered(*bases[cluster], rng);
     Personality p{0.2 + U(rng) * 0.5, 0.2 + U(rng) * 0.6, 0.3 + U(rng) * 0.5};
     people_.emplace_back(i, b, p);

@@ -1,4 +1,0 @@
-/home/runner/work/theprojec/theprojec/build/CMakeFiles/KernelSim.dir
-/home/runner/work/theprojec/theprojec/build/CMakeFiles/OpinionSim.dir
-/home/runner/work/theprojec/theprojec/build/CMakeFiles/edit_cache.dir
-/home/runner/work/theprojec/theprojec/build/CMakeFiles/rebuild_cache.dir
