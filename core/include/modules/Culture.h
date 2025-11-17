@@ -1,10 +1,14 @@
 #ifndef CLUSTERING_H
 #define CLUSTERING_H
 
-#include "kernel/Kernel.h"
 #include <array>
 #include <vector>
 #include <utility>
+#include <cstdint>
+
+// Forward declarations
+class Kernel;
+struct Agent;
 
 struct Cluster {
     std::uint32_t id = 0;

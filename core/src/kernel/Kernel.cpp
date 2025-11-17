@@ -231,7 +231,7 @@ void Kernel::step() {
             }
         }
         
-        economy_.update(region_populations, region_belief_centroids, generation_);
+        economy_.update(region_populations, region_belief_centroids, agents_, generation_);
         
         // Apply economic feedback to agent beliefs and susceptibility
         for (auto& agent : agents_) {

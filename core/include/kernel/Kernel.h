@@ -9,6 +9,7 @@
 #include "modules/Economy.h"
 #include "modules/Psychology.h"
 #include "modules/Health.h"
+#include "modules/Movement.h"
 
 // ---------- Configuration ----------
 struct KernelConfig {
@@ -79,6 +80,10 @@ public:
     const Economy& economy() const { return economy_; }
     Economy& economyMut() { return economy_; }
     
+    // Movement access
+    const MovementModule& movements() const { return movements_; }
+    MovementModule& movementsMut() { return movements_; }
+    
     // Metrics (lightweight for logging)
     struct Metrics {
         double polarizationMean = 0.0;
@@ -105,6 +110,7 @@ private:
     Economy economy_;  // Economic module
     PsychologyModule psychology_;
     HealthModule health_;
+    MovementModule movements_;  // Movement module
 
     // Helper functions
     inline double fastTanh(double x) const {

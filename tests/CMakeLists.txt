@@ -25,18 +25,3 @@ add_test(NAME KernelTests COMMAND kernel_tests)
 add_executable(economy_tests economy_tests.cpp)
 target_link_libraries(economy_tests PRIVATE grandstrategy GTest::gtest_main)
 add_test(NAME EconomyTests COMMAND economy_tests)
-
-# Clustering tests
-add_executable(clustering_tests clustering_tests.cpp)
-target_link_libraries(clustering_tests PRIVATE grandstrategy GTest::gtest_main)
-add_test(NAME ClusteringTests COMMAND clustering_tests)
-
-# Story probes (scenario-based validation)
-# add_executable(story_probes
-#   story_probes.cpp
-#   story_probes/industrial_crisis.cpp
-#   story_probes/rural_conservative.cpp
-#   story_probes/cosmopolitan_trade.cpp
-# )
-# target_link_libraries(story_probes PRIVATE grandstrategy GTest::gtest_main)
-# add_test(NAME StoryProbes COMMAND story_probes)

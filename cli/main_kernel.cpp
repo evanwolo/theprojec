@@ -2,6 +2,7 @@
 #include "io/Snapshot.h"
 #include "modules/Culture.h"
 #include "modules/Economy.h"
+#include "modules/Movement.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -23,6 +24,9 @@ static void printHelp() {
               << "  economy            # show economy summary\n"
               << "  region R           # show regional economy details\n"
               << "  classes            # show emergent economic classes\n"
+              << "  detect_movements   # detect movements from last clustering\n"
+              << "  movements          # list active movements with stats\n"
+              << "  movement ID        # show detailed info for movement ID\n"
               << "  quit               # exit\n";
 }
 
@@ -317,6 +321,118 @@ int main() {
                          << ids.size() << " agents\n";
             }
             std::cout << std::endl;
+            std::cout.flush();
+            
+        } else if (cmd == "detect_movements") {
+            if (g_lastClusters.empty()) {
+                std::cerr << "No clusters detected. Run 'cluster kmeans K' or 'cluster dbscan' first.\n";
+                continue;
+            }
+            
+            std::cerr << "Detecting movements from " << g_lastClusters.size() << " clusters...\n";
+            auto& movMod = kernel.movementsMut();
+            movMod.update(kernel, g_lastClusters, kernel.generation());
+            
+            auto stats = movMod.computeStats();
+            std::cout << "Detected " << stats.totalMovements << " movements (" 
+                      << stats.totalMembership << " total members)\n";
+            std::cout.flush();
+            
+        } else if (cmd == "movements") {
+            const auto& movMod = kernel.movements();
+            auto stats = movMod.computeStats();
+            
+            std::cout << "\n=== Active Movements (Generation " << kernel.generation() << ") ===\n";
+            std::cout << "Total movements: " << stats.totalMovements << "\n";
+            std::cout << "Total membership: " << stats.totalMembership << " agents\n";
+            std::cout << "Average power: " << std::fixed << std::setprecision(3) << stats.avgPower << "\n";
+            std::cout << "Average size: " << std::fixed << std::setprecision(1) << stats.avgSize << "\n";
+            std::cout << "Stages: Birth=" << stats.birthStage << " Growth=" << stats.growthStage
+                      << " Plateau=" << stats.plateauStage << " Decline=" << stats.declineStage << "\n\n";
+            
+            auto byPower = movMod.movementsByPower();
+            const char* stageNames[] = {"Birth", "Growth", "Plateau", "Schism", "Decline", "Dead"};
+            
+            for (const auto* mov : byPower) {
+                std::cout << "Movement #" << mov->id << " [" << stageNames[static_cast<int>(mov->stage)] << "]\n";
+                std::cout << "  Size: " << mov->members.size() << " | Power: " << std::fixed << std::setprecision(3) << mov->power << "\n";
+                std::cout << "  Platform: [" << std::setprecision(2);
+                for (int d = 0; d < 4; ++d) {
+                    std::cout << mov->platform[d];
+                    if (d < 3) std::cout << ", ";
+                }
+                std::cout << "]\n";
+                std::cout << "  Coherence: " << std::setprecision(3) << mov->coherence
+                          << " | Street: " << mov->streetCapacity
+                          << " | Charisma: " << mov->charismaScore << "\n";
+                
+                if (!mov->regionalStrength.empty()) {
+                    std::cout << "  Top regions: ";
+                    std::vector<std::pair<std::uint32_t, double>> sortedRegions(
+                        mov->regionalStrength.begin(), mov->regionalStrength.end());
+                    std::sort(sortedRegions.begin(), sortedRegions.end(),
+                              [](const auto& a, const auto& b) { return a.second > b.second; });
+                    int shown = 0;
+                    for (const auto& [rid, strength] : sortedRegions) {
+                        if (shown >= 3) break;
+                        std::cout << "R" << rid << "=" << std::setprecision(1) << (strength * 100.0) << "% ";
+                        shown++;
+                    }
+                    std::cout << "\n";
+                }
+                std::cout << "\n";
+            }
+            std::cout.flush();
+            
+        } else if (cmd == "movement") {
+            std::uint32_t movId;
+            if (!(iss >> movId)) {
+                std::cerr << "Usage: movement ID\n";
+                continue;
+            }
+            
+            auto& movMod = kernel.movementsMut();
+            auto* mov = movMod.findMovement(movId);
+            if (!mov) {
+                std::cerr << "Movement #" << movId << " not found.\n";
+                continue;
+            }
+            
+            const char* stageNames[] = {"Birth", "Growth", "Plateau", "Schism", "Decline", "Dead"};
+            std::cout << "\n=== Movement #" << mov->id << " ===\n";
+            std::cout << "Stage: " << stageNames[static_cast<int>(mov->stage)] << "\n";
+            std::cout << "Birth: tick " << mov->birthTick << " | Last update: " << mov->lastUpdateTick << "\n";
+            std::cout << "Size: " << mov->members.size() << " agents\n";
+            std::cout << "Leaders: " << mov->leaders.size() << "\n";
+            std::cout << "Power: " << std::fixed << std::setprecision(3) << mov->power << "\n";
+            std::cout << "  Street capacity: " << mov->streetCapacity << "\n";
+            std::cout << "  Charisma score: " << mov->charismaScore << "\n";
+            std::cout << "Coherence: " << mov->coherence << "\n";
+            std::cout << "Momentum: " << mov->momentum << "\n";
+            std::cout << "Platform: [" << std::setprecision(2);
+            for (int d = 0; d < 4; ++d) {
+                std::cout << mov->platform[d];
+                if (d < 3) std::cout << ", ";
+            }
+            std::cout << "]\n";
+            
+            if (!mov->classComposition.empty()) {
+                std::cout << "Class composition:\n";
+                for (const auto& [decile, proportion] : mov->classComposition) {
+                    std::cout << "  Decile " << decile << ": " << std::setprecision(1) << (proportion * 100.0) << "%\n";
+                }
+            }
+            
+            if (!mov->regionalStrength.empty()) {
+                std::cout << "Regional strength:\n";
+                std::vector<std::pair<std::uint32_t, double>> sortedRegions(
+                    mov->regionalStrength.begin(), mov->regionalStrength.end());
+                std::sort(sortedRegions.begin(), sortedRegions.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });
+                for (const auto& [rid, strength] : sortedRegions) {
+                    std::cout << "  Region " << rid << ": " << std::setprecision(1) << (strength * 100.0) << "%\n";
+                }
+            }
             std::cout.flush();
             
         } else if (cmd == "quit") {

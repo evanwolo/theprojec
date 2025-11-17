@@ -12,7 +12,7 @@ TEST(KernelTest, Initialization) {
 
     // Check basic properties
     EXPECT_EQ(kernel.agents().size(), cfg.population);
-    EXPECT_EQ(kernel.regions().size(), cfg.regions);
+    EXPECT_EQ(kernel.regionIndex().size(), cfg.regions);
 }
 
 // Belief update determinism test
@@ -41,4 +41,24 @@ TEST(KernelTest, DeterministicUpdates) {
             EXPECT_FLOAT_EQ(agents1[i].x[d], agents2[i].x[d]);
         }
     }
+}
+
+// Metrics computation test
+TEST(KernelTest, MetricsComputation) {
+    KernelConfig cfg;
+    cfg.population = 500;
+    cfg.regions = 10;
+
+    Kernel kernel(cfg);
+    kernel.stepN(10);
+
+    auto metrics = kernel.computeMetrics();
+
+    // Basic sanity checks
+    EXPECT_GE(metrics.polarizationMean, 0.0);
+    EXPECT_LE(metrics.polarizationMean, 1.0);
+    EXPECT_GE(metrics.avgOpenness, 0.0);
+    EXPECT_LE(metrics.avgOpenness, 1.0);
+    EXPECT_GE(metrics.avgConformity, 0.0);
+    EXPECT_LE(metrics.avgConformity, 1.0);
 }

@@ -1,4 +1,5 @@
 #include "modules/Culture.h"
+#include "kernel/Kernel.h"
 
 #include <algorithm>
 #include <cmath>

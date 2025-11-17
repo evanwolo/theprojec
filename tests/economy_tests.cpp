@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "modules/Economy.h"
+#include <random>
 
 // Basic economy initialization test
 TEST(EconomyTest, Initialization) {
@@ -7,22 +8,51 @@ TEST(EconomyTest, Initialization) {
     Economy economy(200, 10000, rng);
 
     // Check basic properties
-    EXPECT_EQ(economy.regions().size(), 200);
-    EXPECT_EQ(economy.agents().size(), 10000);
+    EXPECT_EQ(economy.getRegions().size(), 200);
+    EXPECT_EQ(economy.getAgents().size(), 10000);
 }
 
-// Trade logic test
-TEST(EconomyTest, TradeLogic) {
+// Price bounds test - prices should stay within 0.1-10x range
+TEST(EconomyTest, PriceBounds) {
     std::mt19937_64 rng(42);
-    Economy economy(2, 100, rng);
+    Economy economy(10, 500, rng);
 
-    // Run a few steps
-    for (int i = 0; i < 10; ++i) {
-        economy.update(std::vector<std::uint32_t>(2, 50),
-                      std::vector<std::array<double, 4>>(2, {0, 0, 0, 0}), i);
+    // Run several updates
+    std::vector<std::uint32_t> regionPopulations(10, 50);
+    std::vector<std::array<double, 4>> regionBeliefs(10, {0, 0, 0, 0});
+
+    for (int i = 0; i < 100; ++i) {
+        economy.update(regionPopulations, regionBeliefs, i);
     }
 
-    // Check that trade links were created
-    // (This is a basic smoke test - more detailed tests would check surpluses/deficits)
-    EXPECT_GE(economy.getTotalTrade(), 0.0);
+    // Check price bounds for all goods in all regions
+    const auto& regions = economy.getRegions();
+    for (const auto& region : regions) {
+        for (int g = 0; g < 5; ++g) {
+            EXPECT_GE(region.prices[g], 0.1) << "Price below minimum";
+            EXPECT_LE(region.prices[g], 10.0) << "Price above maximum";
+        }
+    }
+}
+
+// Welfare computation test
+TEST(EconomyTest, WelfareComputation) {
+    std::mt19937_64 rng(42);
+    Economy economy(5, 100, rng);
+
+    std::vector<std::uint32_t> regionPopulations(5, 20);
+    std::vector<std::array<double, 4>> regionBeliefs(5, {0, 0, 0, 0});
+
+    // Run updates
+    for (int i = 0; i < 10; ++i) {
+        economy.update(regionPopulations, regionBeliefs, i);
+    }
+
+    double meanWelfare = economy.getMeanWelfare();
+    double gini = economy.computeGini();
+
+    // Sanity checks
+    EXPECT_GE(meanWelfare, 0.0);
+    EXPECT_GE(gini, 0.0);
+    EXPECT_LE(gini, 1.0);
 }

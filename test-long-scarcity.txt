@@ -1,0 +1,4 @@
+run 1000 250
+economy
+classes
+quit

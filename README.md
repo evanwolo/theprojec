@@ -1,50 +1,115 @@
 # Grand Strategy Simulation Engine
 
-A nation-scale grand strategy game where societies evolve bottom-up from millions of agents; high-level structures—cultures, movements, institutions, ideologies, media regimes, tech regimes, and wars—emerge, compete, ossify, collapse, and reform over centuries without scripts.
+A nation-scale grand strategy simulation where societies evolve bottom-up from 50,000+ agents. Cultures, movements, economies, and institutions emerge without scripts. You govern through policy, institutions, and strategic decisions—no micromanagement.
+
+## Current Status (Phase 2.3)
+
+**✅ Implemented:**
+- **Kernel:** 50k agents, 4D belief dynamics, Watts-Strogatz networks, 200 regions
+- **Economy:** 5-good trade (Food/Energy/Tools/Luxury/Services), dynamic pricing, regional specialization, wealth/hardship tracking
+- **Clustering:** Charismatic hub detection, identity group formation
+- **Docker:** Multi-stage build, ~150MB image, compose profiles
+
+**🚧 In Progress:**
+- **Movements:** Formation triggers, platforms, power metrics (Phase 3)
+
+See [DESIGN.md](docs/DESIGN.md) for architecture and [CHANGELOG.md](CHANGELOG.md) for version history.
+
+---
 
 ## Quick Start
 
-See [docs/QUICKSTART.md](docs/QUICKSTART.md) for setup and basic usage.
+### Docker (Recommended)
+```bash
+# Build and run interactively
+docker compose up kernel
 
-## Documentation
+# Run batch simulation (1000 ticks, 50k agents)
+docker compose --profile batch up
 
-- [Design Overview](docs/DESIGN.md) - System architecture and vision
-- [Status & Roadmap](docs/STATUS.md) - Current implementation status
-- [Docker Guide](docs/DOCKER.md) - Container deployment
-- [API Reference](docs/API.md) - Module interfaces
-
-## Project Structure
-
-```
-├── core/          # Core simulation engine (static library)
-├── cli/           # Command-line interfaces
-├── tests/         # Unit and integration tests
-├── tools/         # Utilities and visualizers
-├── scenarios/     # Pre-made scenario configurations
-├── mods/          # User-created content and mods
-├── legacy/        # Original prototype (archived)
-├── docker/        # Container configurations
-├── docs/          # Documentation
-└── scripts/       # Build and CI scripts
+# Data persists in ./data/
 ```
 
-## Building
+### Native Build (Windows)
+**Visual Studio 2022:**
+```cmd
+cd e:\theprojec
+build.bat
+cd build
+Release\KernelSim.exe
+```
 
+**Manual (Developer Command Prompt):**
+```cmd
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release
+Release\KernelSim.exe
+```
+
+### Native Build (Linux/macOS)
 ```bash
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build .
-```
-
-## Running
-
-```bash
-# Interactive mode
 ./KernelSim
-
-# Batch processing
-echo "run 1000 50" | ./KernelSim
 ```
+
+---
+
+## Usage
+
+**Interactive CLI:**
+```
+> init 50000 200      # 50k agents, 200 regions
+> run 1000 10         # 1000 ticks, log every 10
+> economy status      # Show economic metrics
+> cultures list       # Show cultural clusters
+> snapshot out.json   # Export state
+> quit
+```
+
+**HTTP Server Mode:**
+```bash
+./KernelSim --http 8080
+curl http://localhost:8080/status
+curl http://localhost:8080/economy/metrics
+```
+
+**Batch Mode:**
+```bash
+echo "init 50000 200" | ./KernelSim
+echo "run 5000 100" | ./KernelSim
+echo "snapshot results.json" | ./KernelSim
+```
+
+---
+
+## Project Structure
+
+```
+core/              # Core simulation (Kernel, Economy, Culture, Health, Psychology modules)
+├── include/       # Public headers
+├── src/           # Implementation
+└── third_party/   # httplib for REST API
+
+cli/               # Command-line interface and HTTP server
+tests/             # Unit and integration tests
+docker/            # Docker Compose configurations
+docs/              # Design docs
+scripts/           # Build automation
+data/              # Simulation outputs (snapshots, metrics, logs)
+```
+
+---
+
+## Documentation
+
+- **[DESIGN.md](docs/DESIGN.md)** - System architecture, emergent structures, ontology
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and milestones
+- **[docs/DOCKER.md](docs/DOCKER.md)** - Container deployment, Kubernetes examples
+
+---
 
 ## License
 

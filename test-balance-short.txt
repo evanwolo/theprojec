@@ -1,0 +1,4 @@
+run 100 100
+economy
+classes
+quit

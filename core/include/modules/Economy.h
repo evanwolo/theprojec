@@ -85,11 +85,15 @@ struct RegionalEconomy {
     std::vector<std::uint32_t> trade_partners;
 };
 
+// Forward declaration
+struct Agent;
+
 class Economy {
 public:
     void init(std::uint32_t num_regions, std::uint32_t num_agents, std::mt19937_64& rng);
     void update(const std::vector<std::uint32_t>& region_populations,
                 const std::vector<std::array<double, 4>>& region_belief_centroids,
+                const std::vector<Agent>& agents,
                 std::uint64_t generation);
     
     // Accessors
@@ -132,7 +136,7 @@ private:
     void computeTrade();
     void computeConsumption();
     void updatePrices();
-    void distributeIncome(const std::vector<std::uint32_t>& region_populations);
+    void distributeIncome(const std::vector<Agent>& agents);
     void computeWelfare();
     void computeInequality();
     void computeHardship();
@@ -146,7 +150,7 @@ private:
                                        double inequality) const;
     
     // Wealth distribution
-    double computeRegionGini(std::uint32_t region_id, const std::vector<std::uint32_t>& region_populations) const;
+    double computeRegionGini(std::uint32_t region_id, const std::vector<Agent>& agents) const;
 };
 
 #endif
