@@ -1,31 +1,54 @@
 # Grand Strategy Simulation Engine
 
-A production-ready C++ simulation core for an emergent agent-based grand strategy game where nations are steered through laws, diplomacy, media, tech, and war, while cultures, movements, ideologies, and regimes emerge from living populations.
+A nation-scale grand strategy game where societies evolve bottom-up from millions of agents; high-level structures—cultures, movements, institutions, ideologies, media regimes, tech regimes, and wars—emerge, compete, ossify, collapse, and reform over centuries without scripts.
 
-## Core Vision
+## Quick Start
 
-A pure grand strategy experience where millions of agents with beliefs, personalities, languages, and kinship networks form the substrate from which cultures, movements, institutions, ideologies, and conflicts emerge organically over centuries—without scripts.
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for setup and basic usage.
 
-## Current Implementation (Phase 1: Kernel v0.2)
+## Documentation
 
-### High-Performance Kernel
-- **50k+ Agents**: Optimized for large-scale simulation (tested at 50,000 agents)
-- **Small-World Network**: Watts–Strogatz topology with configurable rewiring
-- **4D Belief Space**: Authority/Liberty, Tradition/Progress, Hierarchy/Equality, Faith/Rationalism
-- **Personality System**: Openness, conformity, assertiveness, sociality traits
-- **Language Layer**: Primary language + fluency with cross-lingual attenuation
-- **Module Multipliers**: Communication, susceptibility, mobility (integration points for Phase 2+)
-- **Region System**: 200 regions for spatial heterogeneity
-- **Lineage Stubs**: Parent IDs and lineage IDs ready for Phase 2 kinship module
+- [Design Overview](docs/DESIGN.md) - System architecture and vision
+- [Status & Roadmap](docs/STATUS.md) - Current implementation status
+- [Docker Guide](docs/DOCKER.md) - Container deployment
+- [API Reference](docs/API.md) - Module interfaces
 
-### Features
-- ✅ Deterministic belief updates with personality-adaptive similarity gates
-- ✅ Language-based communication quality (same-language vs. cross-lingual)
-- ✅ Cosine similarity gating with configurable floor
-- ✅ Module integration points (tech, media, economy multipliers)
-- ✅ JSON export with optional trait inclusion
-- ✅ CSV metrics logging (polarization, trait distributions)
-- ✅ Clean separation: kernel operates independently of UI/visualization
+## Project Structure
+
+```
+├── core/          # Core simulation engine (static library)
+├── cli/           # Command-line interfaces
+├── tests/         # Unit and integration tests
+├── tools/         # Utilities and visualizers
+├── scenarios/     # Pre-made scenario configurations
+├── mods/          # User-created content and mods
+├── legacy/        # Original prototype (archived)
+├── docker/        # Container configurations
+├── docs/          # Documentation
+└── scripts/       # Build and CI scripts
+```
+
+## Building
+
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build .
+```
+
+## Running
+
+```bash
+# Interactive mode
+./KernelSim
+
+# Batch processing
+echo "run 1000 50" | ./KernelSim
+```
+
+## License
+
+See LICENSE file.
 
 ## Building
 

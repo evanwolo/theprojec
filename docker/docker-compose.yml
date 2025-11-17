@@ -4,14 +4,14 @@ services:
   # Interactive kernel simulation
   kernel:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     image: grand-strategy-kernel:latest
     container_name: kernel-sim
     stdin_open: true
     tty: true
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     environment:
       - TERM=xterm-256color
     command: /app/KernelSim
@@ -20,12 +20,12 @@ services:
   # Batch simulation runner
   batch:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     image: grand-strategy-kernel:latest
     container_name: kernel-batch
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     environment:
       - POPULATION=50000
       - REGIONS=200
@@ -39,14 +39,14 @@ services:
   # Legacy prototype (200 agents)
   legacy:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/Dockerfile
     image: grand-strategy-kernel:latest
     container_name: opinion-sim
     stdin_open: true
     tty: true
     volumes:
-      - ./data:/app/data
+      - ../data:/app/data
     command: /app/OpinionSim
     profiles:
       - legacy

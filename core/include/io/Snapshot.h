@@ -1,7 +1,7 @@
 #ifndef KERNEL_SNAPSHOT_H
 #define KERNEL_SNAPSHOT_H
 
-#include "Kernel.h"
+#include "kernel/Kernel.h"
 #include <string>
 #include <iosfwd>
 

@@ -1,4 +1,4 @@
-#include "KernelSnapshot.h"
+#include "io/Snapshot.h"
 #include <sstream>
 #include <iomanip>
 
@@ -52,5 +52,8 @@ void logMetrics(const Kernel& kernel, std::ostream& out) {
         << m.polarizationMean << ","
         << m.polarizationStd << ","
         << m.avgOpenness << ","
-        << m.avgConformity << "\n";
+        << m.avgConformity << ","
+        << m.globalWelfare << ","
+        << m.globalInequality << ","
+        << m.globalHardship << "\n";
 }

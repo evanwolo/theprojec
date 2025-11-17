@@ -1,8 +1,9 @@
-#include "Kernel.h"
+#include "kernel/Kernel.h"
 #include <cmath>
 #include <algorithm>
 #include <numeric>
 #include <unordered_set>
+#include <omp.h>
 
 Kernel::Kernel(const KernelConfig& cfg) : cfg_(cfg), rng_(cfg.seed) {
     reset(cfg);
@@ -12,8 +13,15 @@ void Kernel::reset(const KernelConfig& cfg) {
     cfg_ = cfg;
     generation_ = 0;
     rng_.seed(cfg.seed);
+    psychology_.configure(cfg_.regions, cfg_.seed ^ 0x9E3779B97F4A7C15ULL);
+    health_.configure(cfg_.regions, cfg_.seed ^ 0xBF58476D1CE4E5B9ULL);
     initAgents();
     buildSmallWorld();
+    
+    // Initialize economy with regions and agents
+    economy_.init(cfg_.regions, cfg_.population, rng_);
+    psychology_.initializeAgents(agents_);
+    health_.initializeAgents(agents_);
 }
 
 void Kernel::initAgents() {
@@ -32,7 +40,7 @@ void Kernel::initAgents() {
         a.id = i;
         a.region = regionDist(rng_);
         a.primaryLang = langDist(rng_);
-        a.fluency = std::clamp(0.7 + 0.3 * (uniDist(rng_) - 0.5), 0.3, 1.0);
+        a.fluency = 0.7 + 0.3 * (uniDist(rng_) - 0.5);
         
         // Personality traits
         a.openness = std::clamp(traitDist(rng_), 0.0, 1.0);
@@ -45,11 +53,11 @@ void Kernel::initAgents() {
             a.x[k] = xDist(rng_);
             a.B[k] = fastTanh(a.x[k]);
         }
+        a.B_norm_sq = a.B[0]*a.B[0] + a.B[1]*a.B[1] + a.B[2]*a.B[2] + a.B[3]*a.B[3];
         
         // Module multipliers (initialized; modules will update)
         a.m_comm = 1.0;
         a.m_susceptibility = 0.7 + 0.6 * (a.openness - 0.5);
-        a.m_susceptibility = std::clamp(a.m_susceptibility, 0.4, 1.2);
         a.m_mobility = 0.8 + 0.4 * a.sociality;
         
         regionIndex_[a.region].push_back(i);
@@ -140,6 +148,7 @@ void Kernel::updateBeliefs() {
     const std::size_t n = agents_.size();
     const double stepSize = cfg_.stepSize;
     
+    #pragma omp parallel for schedule(dynamic)
     for (std::size_t i = 0; i < n; ++i) {
         const auto& ai = agents_[i];
         std::array<double, 4> acc{0, 0, 0, 0};
@@ -167,6 +176,7 @@ void Kernel::updateBeliefs() {
     }
     
     // Apply updates
+    #pragma omp parallel for
     for (std::size_t i = 0; i < n; ++i) {
         agents_[i].x[0] += dx[i][0];
         agents_[i].x[1] += dx[i][1];
@@ -177,12 +187,116 @@ void Kernel::updateBeliefs() {
         agents_[i].B[1] = fastTanh(agents_[i].x[1]);
         agents_[i].B[2] = fastTanh(agents_[i].x[2]);
         agents_[i].B[3] = fastTanh(agents_[i].x[3]);
+
+        // Update cached norm
+        agents_[i].B_norm_sq = agents_[i].B[0] * agents_[i].B[0] +
+                                agents_[i].B[1] * agents_[i].B[1] +
+                                agents_[i].B[2] * agents_[i].B[2] +
+                                agents_[i].B[3] * agents_[i].B[3];
     }
 }
 
 void Kernel::step() {
     updateBeliefs();
     ++generation_;
+    
+    // Update economy every 10 ticks (reduce overhead)
+    if (generation_ % 10 == 0) {
+        // Build population counts and belief centroids per region
+        std::vector<std::uint32_t> region_populations(cfg_.regions, 0);
+        std::vector<std::array<double, 4>> region_belief_centroids(cfg_.regions);
+        
+        // Initialize centroids to zero
+        for (auto& centroid : region_belief_centroids) {
+            centroid = {0.0, 0.0, 0.0, 0.0};
+        }
+        
+        // Accumulate beliefs per region
+        for (const auto& agent : agents_) {
+            region_populations[agent.region]++;
+            region_belief_centroids[agent.region][0] += agent.B[0];
+            region_belief_centroids[agent.region][1] += agent.B[1];
+            region_belief_centroids[agent.region][2] += agent.B[2];
+            region_belief_centroids[agent.region][3] += agent.B[3];
+        }
+        
+        // Compute averages
+        for (std::uint32_t r = 0; r < cfg_.regions; ++r) {
+            if (region_populations[r] > 0) {
+                const double inv_pop = 1.0 / region_populations[r];
+                region_belief_centroids[r][0] *= inv_pop;
+                region_belief_centroids[r][1] *= inv_pop;
+                region_belief_centroids[r][2] *= inv_pop;
+                region_belief_centroids[r][3] *= inv_pop;
+            }
+        }
+        
+        economy_.update(region_populations, region_belief_centroids, generation_);
+        
+        // Apply economic feedback to agent beliefs and susceptibility
+        for (auto& agent : agents_) {
+            const auto& regional_econ = economy_.getRegion(agent.region);
+            const auto& agent_econ = economy_.getAgentEconomy(agent.id);
+            
+            // Hardship increases susceptibility to radical beliefs
+            agent.m_susceptibility = 0.7 + 0.6 * (agent.openness - 0.5);
+            agent.m_susceptibility *= (1.0 + regional_econ.hardship);
+            agent.m_susceptibility = std::clamp(agent.m_susceptibility, 0.4, 2.0);
+            
+            // Economic conditions shape political thought
+            double econ_pressure = 0.001;  // gentle pressure each tick
+            
+            // High personal hardship → reject authority, demand equality
+            if (agent_econ.hardship > 0.5) {
+                agent.B[0] -= econ_pressure * agent_econ.hardship;  // Authority → Liberty
+                agent.B[2] -= econ_pressure * agent_econ.hardship;  // Hierarchy → Equality
+            }
+            
+            // High inequality in region → push toward equality
+            if (regional_econ.inequality > 0.4) {
+                agent.B[2] -= econ_pressure * regional_econ.inequality;  // Hierarchy → Equality
+            }
+            
+            // Personal wealth → support hierarchy and authority
+            if (agent_econ.wealth > 2.0) {
+                agent.B[0] += econ_pressure * 0.5;  // Liberty → Authority
+                agent.B[2] += econ_pressure * 0.5;  // Equality → Hierarchy
+            }
+            
+            // Economic system shapes ideology
+            if (regional_econ.economic_system == "market") {
+                // Market economy → favor liberty, accept hierarchy
+                agent.B[0] -= econ_pressure * 0.3;  // → Liberty
+                agent.B[2] += econ_pressure * 0.2;  // → Hierarchy
+            } else if (regional_econ.economic_system == "planned") {
+                // Planned economy → favor authority, demand equality
+                agent.B[0] += econ_pressure * 0.3;  // → Authority
+                agent.B[2] -= econ_pressure * 0.3;  // → Equality
+            } else if (regional_econ.economic_system == "feudal") {
+                // Feudal system → tradition and hierarchy dominate
+                agent.B[1] += econ_pressure * 0.4;  // → Tradition
+                agent.B[2] += econ_pressure * 0.4;  // → Hierarchy
+            } else if (regional_econ.economic_system == "cooperative") {
+                // Cooperative → equality and local autonomy
+                agent.B[2] -= econ_pressure * 0.3;  // → Equality
+                agent.B[0] -= econ_pressure * 0.2;  // → Liberty
+            }
+            
+            // Low welfare → reject tradition (demand change)
+            if (regional_econ.welfare < 0.5) {
+                agent.B[1] -= econ_pressure * (0.5 - regional_econ.welfare);  // Tradition → Progress
+            }
+            
+            // Keep beliefs in [-1, 1] range
+            for (int d = 0; d < 4; ++d) {
+                agent.B[d] = std::clamp(agent.B[d], -1.0, 1.0);
+            }
+        }
+    }
+
+    // Update health and psychology every tick using latest economic signals
+    health_.updateAgents(agents_, economy_, generation_);
+    psychology_.updateAgents(agents_, economy_, generation_);
 }
 
 void Kernel::stepN(int n) {
@@ -255,6 +369,11 @@ Kernel::Metrics Kernel::computeMetrics() const {
     }
     m.avgOpenness /= agents_.size();
     m.avgConformity /= agents_.size();
+    
+    // Economy metrics
+    m.globalWelfare = economy_.globalWelfare();
+    m.globalInequality = economy_.globalInequality();
+    m.globalHardship = economy_.globalHardship();
     
     return m;
 }

@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <string>
 #include <random>
+#include "modules/Economy.h"
+#include "modules/Psychology.h"
+#include "modules/Health.h"
 
 // ---------- Configuration ----------
 struct KernelConfig {
@@ -42,12 +45,16 @@ struct Agent {
     // Belief state: internal x (unbounded), observable B = tanh(x)
     std::array<double, 4> x{0, 0, 0, 0};  // internal state
     std::array<double, 4> B{0, 0, 0, 0};  // beliefs [-1,1]
+    double B_norm_sq = 0.0; // cached squared norm of B
     
     // Module multipliers (written by tech/media/economy modules)
     double m_comm = 1.0;        // communication reach/speed
     double m_susceptibility = 1.0;  // influence susceptibility
     double m_mobility = 1.0;    // migration/relocation ease
     
+    PsychologicalState psych;
+    HealthState health;
+
     // Network (sparse adjacency)
     std::vector<std::uint32_t> neighbors;
 };
@@ -68,63 +75,69 @@ public:
     const std::vector<std::vector<std::uint32_t>>& regionIndex() const { return regionIndex_; }
     std::uint64_t generation() const { return generation_; }
     
+    // Economy access
+    const Economy& economy() const { return economy_; }
+    Economy& economyMut() { return economy_; }
+    
     // Metrics (lightweight for logging)
     struct Metrics {
         double polarizationMean = 0.0;
         double polarizationStd = 0.0;
         double avgOpenness = 0.0;
         double avgConformity = 0.0;
+        // Economy metrics
+        double globalWelfare = 1.0;
+        double globalInequality = 0.0;
+        double globalHardship = 0.0;
     };
     Metrics computeMetrics() const;
     
 private:
+    void initAgents();
+    void buildSmallWorld();
+    void updateBeliefs();
+
     KernelConfig cfg_;
     std::vector<Agent> agents_;
     std::vector<std::vector<std::uint32_t>> regionIndex_;  // region -> agent IDs
     std::uint64_t generation_ = 0;
     std::mt19937_64 rng_;
-    
-    void initAgents();
-    void buildSmallWorld();
-    void updateBeliefs();
-    
-    // Helper functions (inline for performance)
-    inline double languageQuality(const Agent& i, const Agent& j) const {
-        if (i.primaryLang == j.primaryLang) {
-            return std::min(i.fluency, j.fluency);
-        } else {
-            // Cross-lingual influence attenuates
-            return 0.25 * std::min(i.fluency, j.fluency);
-        }
-    }
-    
-    inline double similarityGate(const Agent& i, const Agent& j) const {
-        // Cosine similarity in belief space - optimized with loop unrolling
-        const double dot = i.B[0] * j.B[0] + i.B[1] * j.B[1] + 
-                           i.B[2] * j.B[2] + i.B[3] * j.B[3];
-        const double ni = i.B[0] * i.B[0] + i.B[1] * i.B[1] + 
-                          i.B[2] * i.B[2] + i.B[3] * i.B[3];
-        const double nj = j.B[0] * j.B[0] + j.B[1] * j.B[1] + 
-                          j.B[2] * j.B[2] + j.B[3] * j.B[3];
-        
-        double sim = 0.0;
-        if (ni > 0.0 && nj > 0.0) {
-            // Use single sqrt for product to reduce sqrt calls
-            sim = dot / std::sqrt(ni * nj);  // -1..1
-        }
-        sim = 0.5 * (sim + 1.0);  // normalize to 0..1
-        return std::max(sim, cfg_.simFloor);
-    }
-    
-    // Fast tanh approximation for performance (accurate in [-3, 3])
+    Economy economy_;  // Economic module
+    PsychologyModule psychology_;
+    HealthModule health_;
+
+    // Helper functions
     inline double fastTanh(double x) const {
-        // Clamp to avoid overflow
-        if (x < -3.0) return -1.0;
-        if (x > 3.0) return 1.0;
-        // Rational approximation: tanh(x) ≈ x * (27 + x²) / (27 + 9*x²)
-        const double x2 = x * x;
+        // Padé approximant for tanh: (x * (27 + x^2)) / (27 + 9 * x^2)
+        // This is a fast, reasonably accurate approximation.
+        double x2 = x * x;
         return x * (27.0 + x2) / (27.0 + 9.0 * x2);
+    }
+
+    inline double similarityGate(const Agent& a, const Agent& b) const {
+        // Cosine similarity: (a . b) / (||a|| * ||b||)
+        // We use cached squared norms to avoid sqrt.
+        double dot = a.B[0] * b.B[0] + a.B[1] * b.B[1] + a.B[2] * b.B[2] + a.B[3] * b.B[3];
+        
+        double norm_prod_sq = a.B_norm_sq * b.B_norm_sq;
+        
+        if (norm_prod_sq < 1e-9) {
+            return 1.0; // Both vectors are near-zero, consider them similar
+        }
+        
+        // similarity = cos(theta)
+        double sim = dot / std::sqrt(norm_prod_sq);
+        
+        // Simple linear gate: 0 if sim < floor, 1 if sim > 1, linear in between
+        return std::max(0.0, (sim - cfg_.simFloor) / (1.0 - cfg_.simFloor));
+    }
+
+    inline double languageQuality(const Agent& a, const Agent& b) const {
+        if (a.primaryLang == b.primaryLang) {
+            return 0.5 * (a.fluency + b.fluency);
+        }
+        return 0.1; // Low quality for different languages
     }
 };
 
-#endif
+#endif // KERNEL_H

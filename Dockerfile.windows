@@ -15,10 +15,15 @@ RUN choco install -y visualstudio2022buildtools --package-parameters "--add Micr
 
 WORKDIR C:\app
 
-# Copy source files
-COPY include\ .\include\
-COPY src\ .\src\
-COPY CMakeLists.txt .\
+# Copy source files (modular layout)
+COPY ["CMakeLists.txt", ".\\"]
+COPY ["core\\", ".\\core\\"]
+COPY ["cli\\", ".\\cli\\"]
+COPY ["tests\\", ".\\tests\\"]
+COPY ["legacy\\", ".\\legacy\\"]
+COPY ["docs\\", ".\\docs\\"]
+COPY ["docker\\", ".\\docker\\"]
+COPY ["scripts\\", ".\\scripts\\"]
 
 # Build
 RUN powershell -Command `

@@ -1,7 +1,7 @@
 #ifndef CLUSTERING_H
 #define CLUSTERING_H
 
-#include "Kernel.h"
+#include "kernel/Kernel.h"
 #include <array>
 #include <vector>
 #include <utility>

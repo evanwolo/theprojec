@@ -1,0 +1,7 @@
+run 3000 300
+economy
+region 0
+region 50
+region 100
+region 150
+quit

@@ -1,0 +1,4 @@
+reset 50000 200 8 0.03
+run 3000 3000
+dump_regions
+quit
