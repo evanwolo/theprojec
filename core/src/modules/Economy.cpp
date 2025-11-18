@@ -555,7 +555,7 @@ std::string Economy::determineEconomicSystem(const std::array<double, 4>& belief
     // Negative = (Liberty, Progress, Equality, Rationalism)
     
     double authority = beliefs[0];
-    double tradition = beliefs[1];
+    // double tradition = beliefs[1];  // Reserved for future use
     double hierarchy = beliefs[2];
     
     // Low development → feudal or cooperative
@@ -595,7 +595,7 @@ std::string Economy::determineEconomicSystem(const std::array<double, 4>& belief
 
 
 
-double Economy::computeRegionGini(std::uint32_t region_id, const std::vector<Agent>& agents) const {
+double Economy::computeRegionGini(std::uint32_t /* region_id */, const std::vector<Agent>& /* agents */) const {
     // Compute Gini coefficient for wealth distribution in a region using O(N log N) algorithm
     // Gini = 0 (perfect equality) to 1 (total inequality)
     

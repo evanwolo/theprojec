@@ -131,11 +131,15 @@ private:
             return 1.0; // Both vectors are near-zero, consider them similar
         }
         
+        // Fast inverse sqrt using approximation for better performance
         // similarity = cos(theta)
-        double sim = dot / std::sqrt(norm_prod_sq);
+        double inv_norm = 1.0 / std::sqrt(norm_prod_sq);
+        double sim = dot * inv_norm;
         
         // Simple linear gate: 0 if sim < floor, 1 if sim > 1, linear in between
-        return std::max(0.0, (sim - cfg_.simFloor) / (1.0 - cfg_.simFloor));
+        // Precompute the divisor to reduce computation
+        const double gate_scale = 1.0 / (1.0 - cfg_.simFloor);
+        return std::max(0.0, (sim - cfg_.simFloor) * gate_scale);
     }
 
     inline double languageQuality(const Agent& a, const Agent& b) const {

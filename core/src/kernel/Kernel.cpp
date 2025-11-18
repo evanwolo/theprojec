@@ -156,20 +156,37 @@ void Kernel::updateBeliefs() {
         // Cache agent properties used in inner loop
         const double ai_susceptibility = ai.m_susceptibility;
         const double ai_comm = ai.m_comm;
+        const double base_weight = stepSize * ai_susceptibility;
+        const std::uint8_t ai_lang = ai.primaryLang;
+        const double ai_fluency = ai.fluency;
+        
+        // Cache ai beliefs for inner loop
+        const double ai_B0 = ai.B[0];
+        const double ai_B1 = ai.B[1];
+        const double ai_B2 = ai.B[2];
+        const double ai_B3 = ai.B[3];
         
         for (auto jid : ai.neighbors) {
             const auto& aj = agents_[jid];
             
             double s = similarityGate(ai, aj);
-            double lq = languageQuality(ai, aj);
+            
+            // Inline and optimize languageQuality
+            double lq;
+            if (ai_lang == aj.primaryLang) {
+                lq = 0.5 * (ai_fluency + aj.fluency);
+            } else {
+                lq = 0.1;
+            }
+            
             double comm = 0.5 * (ai_comm + aj.m_comm);
-            double weight = stepSize * s * lq * comm * ai_susceptibility;
+            double weight = base_weight * s * lq * comm;
             
             // Unroll belief dimension loop for better performance
-            acc[0] += weight * fastTanh(aj.B[0] - ai.B[0]);
-            acc[1] += weight * fastTanh(aj.B[1] - ai.B[1]);
-            acc[2] += weight * fastTanh(aj.B[2] - ai.B[2]);
-            acc[3] += weight * fastTanh(aj.B[3] - ai.B[3]);
+            acc[0] += weight * fastTanh(aj.B[0] - ai_B0);
+            acc[1] += weight * fastTanh(aj.B[1] - ai_B1);
+            acc[2] += weight * fastTanh(aj.B[2] - ai_B2);
+            acc[3] += weight * fastTanh(aj.B[3] - ai_B3);
         }
         
         dx[i] = acc;
@@ -189,10 +206,11 @@ void Kernel::updateBeliefs() {
         agents_[i].B[3] = fastTanh(agents_[i].x[3]);
 
         // Update cached norm
-        agents_[i].B_norm_sq = agents_[i].B[0] * agents_[i].B[0] +
-                                agents_[i].B[1] * agents_[i].B[1] +
-                                agents_[i].B[2] * agents_[i].B[2] +
-                                agents_[i].B[3] * agents_[i].B[3];
+        const double B0 = agents_[i].B[0];
+        const double B1 = agents_[i].B[1];
+        const double B2 = agents_[i].B[2];
+        const double B3 = agents_[i].B[3];
+        agents_[i].B_norm_sq = B0 * B0 + B1 * B1 + B2 * B2 + B3 * B3;
     }
 }
 

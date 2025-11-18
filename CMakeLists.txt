@@ -12,10 +12,10 @@ option(ENABLE_OPENMP "Enable OpenMP parallelization" ON)
 
 # Compiler flags
 if(MSVC)
-  add_compile_options(/W4 /O2)
+  add_compile_options(/W4 /O2 /fp:fast)
 else()
   add_compile_options(-Wall -Wextra -pedantic)
-  set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
+  set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG -ffast-math -funroll-loops -finline-functions")
 endif()
 
 # OpenMP

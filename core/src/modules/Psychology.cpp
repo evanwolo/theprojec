@@ -32,7 +32,7 @@ void PsychologyModule::initializeAgents(std::vector<Agent>& agents) {
     }
 }
 
-void PsychologyModule::updateAgents(std::vector<Agent>& agents, const Economy& economy, std::uint64_t tick) {
+void PsychologyModule::updateAgents(std::vector<Agent>& agents, const Economy& economy, std::uint64_t /* tick */) {
     if (regional_profiles_.empty()) {
         return;
     }
