@@ -12,6 +12,15 @@ constexpr double TOOLS_SUBSISTENCE = 0.2;     // Was 0.3, reduced for bootstrap
 constexpr double LUXURY_SUBSISTENCE = 0.0;    // non-essential
 constexpr double SERVICES_SUBSISTENCE = 0.15; // Was 0.2, reduced for bootstrap
 
+// Subsistence lookup array for faster access
+constexpr double SUBSISTENCE[kGoodTypes] = {
+    FOOD_SUBSISTENCE,    // FOOD = 0
+    ENERGY_SUBSISTENCE,  // ENERGY = 1
+    TOOLS_SUBSISTENCE,   // TOOLS = 2
+    LUXURY_SUBSISTENCE,  // LUXURY = 3
+    SERVICES_SUBSISTENCE // SERVICES = 4
+};
+
 // Development rates
 constexpr double DEVELOPMENT_GROWTH_RATE = 0.01;  // per tick with surplus
 constexpr double DEVELOPMENT_DECAY_RATE = 0.005;  // per tick with hardship
@@ -152,10 +161,10 @@ void Economy::computeHardship() {
         double tools_per_capita = region.consumption[TOOLS] / region.population;
         double services_per_capita = region.consumption[SERVICES] / region.population;
         
-        double food_deficit = std::max(0.0, FOOD_SUBSISTENCE - food_per_capita) / FOOD_SUBSISTENCE;
-        double energy_deficit = std::max(0.0, ENERGY_SUBSISTENCE - energy_per_capita) / ENERGY_SUBSISTENCE;
-        double tools_deficit = std::max(0.0, TOOLS_SUBSISTENCE - tools_per_capita) / TOOLS_SUBSISTENCE;
-        double services_deficit = std::max(0.0, SERVICES_SUBSISTENCE - services_per_capita) / SERVICES_SUBSISTENCE;
+        double food_deficit = std::max(0.0, SUBSISTENCE[FOOD] - food_per_capita) / SUBSISTENCE[FOOD];
+        double energy_deficit = std::max(0.0, SUBSISTENCE[ENERGY] - energy_per_capita) / SUBSISTENCE[ENERGY];
+        double tools_deficit = std::max(0.0, SUBSISTENCE[TOOLS] - tools_per_capita) / SUBSISTENCE[TOOLS];
+        double services_deficit = std::max(0.0, SUBSISTENCE[SERVICES] - services_per_capita) / SUBSISTENCE[SERVICES];
         
         // Weighted average (food and energy most critical)
         region.hardship = (food_deficit * 0.4 + energy_deficit * 0.3 + 
@@ -311,11 +320,7 @@ void Economy::computeTrade() {
         if (region.population == 0) continue;
         
         for (int g = 0; g < kGoodTypes; ++g) {
-            double per_capita = region.production[g] / region.population;
-            double subsistence = (g == FOOD) ? FOOD_SUBSISTENCE : 
-                               (g == ENERGY) ? ENERGY_SUBSISTENCE :
-                               (g == TOOLS) ? TOOLS_SUBSISTENCE :
-                               (g == SERVICES) ? SERVICES_SUBSISTENCE : LUXURY_SUBSISTENCE;
+            const double subsistence = SUBSISTENCE[g];
             
             double surplus = region.production[g] - (region.population * subsistence);
             
@@ -372,10 +377,7 @@ void Economy::updatePrices() {
         
         for (int g = 0; g < kGoodTypes; ++g) {
             double supply = region.production[g];
-            double subsistence = (g == FOOD) ? FOOD_SUBSISTENCE : 
-                               (g == ENERGY) ? ENERGY_SUBSISTENCE :
-                               (g == TOOLS) ? TOOLS_SUBSISTENCE :
-                               (g == SERVICES) ? SERVICES_SUBSISTENCE : LUXURY_SUBSISTENCE;
+            const double subsistence = SUBSISTENCE[g];
             double demand = region.population * (subsistence + region.welfare * 0.5);  // demand increases with welfare
             
             double supply_demand_ratio = (demand > 0) ? (supply / demand) : 1.0;
