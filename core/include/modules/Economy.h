@@ -90,7 +90,10 @@ struct Agent;
 
 class Economy {
 public:
-    void init(std::uint32_t num_regions, std::uint32_t num_agents, std::mt19937_64& rng);
+    void init(std::uint32_t num_regions,
+              std::uint32_t num_agents,
+              std::mt19937_64& rng,
+              const std::string& start_condition);
     void update(const std::vector<std::uint32_t>& region_populations,
                 const std::vector<std::array<double, 4>>& region_belief_centroids,
                 const std::vector<Agent>& agents,
@@ -124,11 +127,25 @@ public:
     void reallocateToWar(double fraction);
     
 private:
+    struct StartConditionProfile {
+        std::string name;
+        double baseDevelopment = 0.1;
+        double developmentJitter = 0.05;
+        std::array<double, kGoodTypes> endowmentMultipliers = {1.0, 1.0, 1.0, 1.0, 1.0};
+        std::string defaultSystem = "mixed";
+        double wealthLogMean = 0.0;
+        double wealthLogStd = 0.7;
+        double productivityMean = 1.0;
+        double productivityStd = 0.3;
+    };
+
     std::vector<RegionalEconomy> regions_;
     std::vector<TradeLink> trade_links_;
     std::vector<AgentEconomy> agents_;
     std::string forced_model_ = "";  // if set, overrides emergent systems
     double war_allocation_ = 0.0;
+    std::string start_condition_name_ = "baseline";
+    StartConditionProfile start_profile_{};
     
     void initializeEndowments(std::mt19937_64& rng);
     void initializeTradeNetwork();
@@ -141,10 +158,12 @@ private:
     void updatePrices();
     void distributeIncome(const std::vector<Agent>& agents);
     void computeWelfare();
-    void computeInequality();
+    void computeInequality(const std::vector<Agent>& agents);
     void computeHardship();
     void evolveDevelopment();
     void evolveEconomicSystems(const std::vector<std::array<double, 4>>& region_belief_centroids);
+
+    StartConditionProfile resolveStartCondition(const std::string& name) const;
     
     // Economic system emergence
     std::string determineEconomicSystem(const std::array<double, 4>& beliefs, 

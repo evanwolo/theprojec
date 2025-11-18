@@ -38,7 +38,7 @@ void Kernel::reset(const KernelConfig& cfg) {
     buildSmallWorld();
     
     // Initialize economy with regions and agents
-    economy_.init(cfg_.regions, cfg_.population, rng_);
+    economy_.init(cfg_.regions, cfg_.population, rng_, cfg_.startCondition);
     psychology_.initializeAgents(agents_);
     health_.initializeAgents(agents_);
 }
@@ -53,7 +53,15 @@ void Kernel::initAgents() {
     std::uniform_real_distribution<double> uniDist(0.0, 1.0);
     std::uniform_int_distribution<std::uint32_t> regionDist(0, cfg_.regions - 1);
     std::uniform_int_distribution<std::uint8_t> langDist(0, 3);  // 4 base languages
-    std::uniform_int_distribution<int> ageDist(15, 60);  // Initial population: working age adults
+    
+    // Realistic age distribution - approximates demographic pyramid
+    // Age brackets: [0-15), [15-30), [30-50), [50-70), [70-90]
+    std::vector<double> age_boundaries = {0.0, 15.0, 30.0, 50.0, 70.0, 90.0};
+    std::vector<double> age_weights = {0.20, 0.28, 0.26, 0.18, 0.08};
+    std::piecewise_constant_distribution<double> ageDist(
+        age_boundaries.begin(), age_boundaries.end(),
+        age_weights.begin()
+    );
     std::bernoulli_distribution sexDist(0.5);  // 50/50 male/female
     
     for (std::uint32_t i = 0; i < cfg_.population; ++i) {
@@ -62,8 +70,8 @@ void Kernel::initAgents() {
         a.region = regionDist(rng_);
         a.alive = true;
         
-        // Demography: initial population is working-age adults
-        a.age = ageDist(rng_);
+        // Demography: realistic age distribution
+        a.age = static_cast<int>(ageDist(rng_));
         a.female = sexDist(rng_);
         
         a.primaryLang = langDist(rng_);
@@ -551,7 +559,9 @@ void Kernel::stepDemography() {
     }
     
     std::vector<std::uint32_t> newBirths;
-    std::bernoulli_distribution d(0.5);
+    std::uniform_real_distribution<double> uniform_01(0.0, 1.0);
+    int death_count = 0;
+    int birth_count = 0;
     
     // Process deaths and births
     for (auto& agent : agents_) {
@@ -563,18 +573,18 @@ void Kernel::stepDemography() {
             // Hard cap on age
             if (agent.age > cfg_.maxAgeYears) {
                 agent.alive = false;
+                event_log_.logDeath(generation_, agent.id, agent.region, agent.age);
+                death_count++;
                 continue;
             }
         }
         
-        // Mortality (region-specific)
+        // Mortality (region-specific) - use uniform distribution for reliability
         double pDeath = mortalityPerTick(agent.age, agent.region);
-        d = std::bernoulli_distribution(pDeath);
-        if (d(rng_)) {
+        if (uniform_01(rng_) < pDeath) {
             agent.alive = false;
-            
-            // Log death event
             event_log_.logDeath(generation_, agent.id, agent.region, agent.age);
+            death_count++;
             continue;
         }
         
@@ -599,9 +609,9 @@ void Kernel::stepDemography() {
                 pBirth /= pressure;  // Reduce fertility in overpopulated regions
             }
             
-            d = std::bernoulli_distribution(pBirth);
-            if (d(rng_)) {
+            if (uniform_01(rng_) < pBirth) {
                 newBirths.push_back(agent.id);
+                birth_count++;
             }
         }
     }
@@ -609,6 +619,13 @@ void Kernel::stepDemography() {
     // Create children
     for (auto motherId : newBirths) {
         createChild(motherId);
+    }
+    
+    // Debug output for demographic tracking (optional - can be removed in production)
+    if (death_count > 0 || birth_count > 0) {
+        // Output is visible when running with verbose logging
+        // fprintf(stderr, "[Demo] Gen %llu: %d births, %d deaths (pop: %zu)\n", 
+        //         generation_, birth_count, death_count, agents_.size());
     }
     
     // Periodically compact dead agents (every 100 ticks to avoid overhead)
@@ -842,5 +859,135 @@ void Kernel::stepMigration() {
             }
         }
     }
+}
+
+Kernel::Statistics Kernel::getStatistics() const {
+    Statistics stats;
+    
+    // Initialize
+    stats.totalAgents = static_cast<std::uint32_t>(agents_.size());
+    stats.minAge = cfg_.maxAgeYears;
+    stats.maxAge = 0;
+    
+    // Age sum for average
+    std::uint64_t ageSum = 0;
+    std::uint64_t connectionSum = 0;
+    
+    // Belief accumulators
+    std::array<double, 4> beliefSum = {0, 0, 0, 0};
+    std::vector<double> polarizations;
+    polarizations.reserve(agents_.size());
+    
+    // Regional population counts
+    std::vector<std::uint32_t> regionPops(cfg_.regions, 0);
+    
+    // Process each agent
+    for (const auto& agent : agents_) {
+        if (!agent.alive) continue;
+        
+        stats.aliveAgents++;
+        
+        // Age demographics
+        ageSum += agent.age;
+        if (agent.age < stats.minAge) stats.minAge = agent.age;
+        if (agent.age > stats.maxAge) stats.maxAge = agent.age;
+        
+        // Age groups
+        if (agent.age < 15) stats.children++;
+        else if (agent.age < 30) stats.youngAdults++;
+        else if (agent.age < 50) stats.middleAge++;
+        else if (agent.age < 70) stats.mature++;
+        else stats.elderly++;
+        
+        // Gender
+        if (agent.female) stats.females++;
+        else stats.males++;
+        
+        // Network
+        connectionSum += agent.neighbors.size();
+        if (agent.neighbors.empty()) stats.isolatedAgents++;
+        
+        // Beliefs
+        for (int i = 0; i < 4; ++i) {
+            beliefSum[i] += agent.B[i];
+        }
+        double polarization = std::sqrt(agent.B_norm_sq);
+        polarizations.push_back(polarization);
+        
+        // Region
+        regionPops[agent.region]++;
+        
+        // Language
+        stats.langCounts[agent.primaryLang]++;
+    }
+    
+    // Compute averages
+    if (stats.aliveAgents > 0) {
+        stats.avgAge = static_cast<double>(ageSum) / stats.aliveAgents;
+        stats.avgConnections = static_cast<double>(connectionSum) / stats.aliveAgents;
+        
+        for (int i = 0; i < 4; ++i) {
+            stats.avgBeliefs[i] = beliefSum[i] / stats.aliveAgents;
+        }
+        
+        // Polarization statistics
+        double polSum = 0.0;
+        for (double p : polarizations) {
+            polSum += p;
+        }
+        stats.polarizationMean = polSum / polarizations.size();
+        
+        double polVarSum = 0.0;
+        for (double p : polarizations) {
+            double diff = p - stats.polarizationMean;
+            polVarSum += diff * diff;
+        }
+        stats.polarizationStd = std::sqrt(polVarSum / polarizations.size());
+    }
+    
+    // Regional statistics
+    std::uint32_t nonEmptyRegions = 0;
+    std::uint32_t minPop = cfg_.population;
+    std::uint32_t maxPop = 0;
+    
+    for (auto pop : regionPops) {
+        if (pop > 0) {
+            nonEmptyRegions++;
+            if (pop < minPop) minPop = pop;
+            if (pop > maxPop) maxPop = pop;
+        }
+    }
+    
+    stats.occupiedRegions = nonEmptyRegions;
+    if (nonEmptyRegions > 0) {
+        stats.avgPopPerRegion = static_cast<double>(stats.aliveAgents) / nonEmptyRegions;
+        stats.minRegionPop = minPop;
+        stats.maxRegionPop = maxPop;
+    }
+    
+    // Language count
+    for (int i = 0; i < 256; ++i) {
+        if (stats.langCounts[i] > 0) {
+            stats.numLanguages++;
+        }
+    }
+    
+    // Economy metrics (from existing system)
+    auto metrics = computeMetrics();
+    stats.globalWelfare = metrics.globalWelfare;
+    stats.globalInequality = metrics.globalInequality;
+    
+    // Average income
+    double incomeSum = 0.0;
+    for (std::size_t i = 0; i < agents_.size(); ++i) {
+        if (agents_[i].alive) {
+            incomeSum += economy_.getAgentEconomy(i).income;
+        }
+    }
+    if (stats.aliveAgents > 0) {
+        stats.avgIncome = incomeSum / stats.aliveAgents;
+    }
+    
+    return stats;
 }
 

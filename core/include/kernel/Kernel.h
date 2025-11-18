@@ -21,6 +21,7 @@ struct KernelConfig {
     double stepSize = 0.15;             // eta (global influence rate)
     double simFloor = 0.05;             // minimum similarity gate
     std::uint64_t seed = 42;
+    std::string startCondition = "baseline"; // economic starting profile
     
     // Demography
     int ticksPerYear = 10;              // age granularity
@@ -112,6 +113,54 @@ public:
         double globalHardship = 0.0;
     };
     Metrics computeMetrics() const;
+    
+    // Detailed Statistics (for probing/analysis)
+    struct Statistics {
+        // Population
+        std::uint32_t totalAgents = 0;
+        std::uint32_t aliveAgents = 0;
+        
+        // Demographics by age group
+        std::uint32_t children = 0;        // 0-14
+        std::uint32_t youngAdults = 0;     // 15-29
+        std::uint32_t middleAge = 0;       // 30-49
+        std::uint32_t mature = 0;          // 50-69
+        std::uint32_t elderly = 0;         // 70+
+        
+        // Gender
+        std::uint32_t males = 0;
+        std::uint32_t females = 0;
+        
+        // Age statistics
+        double avgAge = 0.0;
+        int minAge = 0;
+        int maxAge = 0;
+        
+        // Network
+        double avgConnections = 0.0;
+        std::uint32_t isolatedAgents = 0;
+        
+        // Beliefs
+        double polarizationMean = 0.0;
+        double polarizationStd = 0.0;
+        std::array<double, 4> avgBeliefs = {0, 0, 0, 0};
+        
+        // Regional distribution
+        std::uint32_t occupiedRegions = 0;
+        double avgPopPerRegion = 0.0;
+        std::uint32_t minRegionPop = 0;
+        std::uint32_t maxRegionPop = 0;
+        
+        // Economy
+        double globalWelfare = 1.0;
+        double globalInequality = 0.0;
+        double avgIncome = 0.0;
+        
+        // Languages
+        std::array<std::uint32_t, 256> langCounts = {0};
+        std::uint8_t numLanguages = 0;
+    };
+    Statistics getStatistics() const;
     
 private:
     void initAgents();

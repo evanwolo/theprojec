@@ -4,6 +4,8 @@
 #include <numeric>
 #include <cmath>
 #include <random>
+#include <cctype>
+#include <iostream>
 
 // Thread-local RNG for parallel operations (prevents race conditions)
 namespace {
@@ -34,17 +36,24 @@ constexpr double PRICE_ADJUSTMENT_RATE = 0.05;  // per tick based on supply/dema
 // Transport cost (scales with distance)
 constexpr double BASE_TRANSPORT_COST = 0.02;  // 2% per hop
 
-void Economy::init(std::uint32_t num_regions, std::uint32_t num_agents, std::mt19937_64& rng) {
+void Economy::init(std::uint32_t num_regions,
+                   std::uint32_t num_agents,
+                   std::mt19937_64& rng,
+                   const std::string& start_condition) {
     regions_.clear();
     regions_.reserve(num_regions);
     trade_links_.clear();
     agents_.clear();
+    start_condition_name_ = start_condition;
+    start_profile_ = resolveStartCondition(start_condition);
     
+    std::normal_distribution<double> devNoise(0.0, start_profile_.developmentJitter);
     for (std::uint32_t i = 0; i < num_regions; ++i) {
         RegionalEconomy region;
         region.region_id = i;
-        region.development = 0.1;  // Start with minimal development
-        region.economic_system = "mixed";  // Initial system
+        double devSample = start_profile_.baseDevelopment + devNoise(rng);
+        region.development = std::clamp(devSample, 0.02, 5.0);
+        region.economic_system = start_profile_.defaultSystem;  // Initial system
         region.system_stability = 1.0;
         
         regions_.push_back(region);
@@ -77,7 +86,7 @@ void Economy::update(const std::vector<std::uint32_t>& region_populations,
     updatePrices();
     distributeIncome(agents);
     computeWelfare();
-    computeInequality();
+    computeInequality(agents);
     computeHardship();
 }
 
@@ -123,7 +132,7 @@ void Economy::computeWelfare() {
     }
 }
 
-void Economy::computeInequality() {
+void Economy::computeInequality(const std::vector<Agent>& agents) {
     // Compute Gini coefficient for each region based on agent wealth
     for (std::size_t i = 0; i < regions_.size(); ++i) {
         if (regions_[i].population == 0) {
@@ -132,8 +141,7 @@ void Economy::computeInequality() {
         }
         
         // Compute Gini from agent wealth distribution
-        double gini = computeRegionGini(static_cast<std::uint32_t>(i), 
-                                       std::vector<Agent>());  // Pass empty vector - not used anymore
+        double gini = computeRegionGini(static_cast<std::uint32_t>(i), agents);
         
         // Also factor in economic system's inherent inequality
         if (regions_[i].economic_system == "market") {
@@ -240,6 +248,10 @@ void Economy::initializeEndowments(std::mt19937_64& rng) {
         for (int g = 0; g < kGoodTypes; ++g) {
             region.specialization[g] = 0.0;
         }
+
+        for (int g = 0; g < kGoodTypes; ++g) {
+            region.endowments[g] *= start_profile_.endowmentMultipliers[g];
+        }
     }
 }
 
@@ -263,14 +275,19 @@ void Economy::initializeAgents(std::uint32_t num_agents, std::mt19937_64& rng) {
     agents_.clear();
     agents_.reserve(num_agents);
     
-    std::uniform_real_distribution<double> wealth_dist(0.5, 1.5);
+    // Log-normal distribution for wealth
+    std::lognormal_distribution<double> wealth_dist(start_profile_.wealthLogMean,
+                                                   start_profile_.wealthLogStd);
     std::uniform_int_distribution<int> sector_dist(0, kGoodTypes - 1);
+    // Individual productivity variance (skills, education, health)
+    std::normal_distribution<double> productivity_dist(start_profile_.productivityMean,
+                                                       start_profile_.productivityStd);
     
     for (std::uint32_t i = 0; i < num_agents; ++i) {
         AgentEconomy agent;
-        agent.wealth = wealth_dist(rng);
+        agent.wealth = std::max(0.05, wealth_dist(rng));
         agent.income = 1.0;
-        agent.productivity = 1.0;
+        agent.productivity = std::clamp(productivity_dist(rng), 0.2, 3.0);
         agent.sector = sector_dist(rng);
         agent.hardship = 0.0;
         
@@ -452,8 +469,15 @@ void Economy::distributeIncome(const std::vector<Agent>& agents) {
         double income_share = agent.productivity / region_total_productivity[region_id];
         agent.income = sector_production * income_share * region.prices[agent.sector];
         
-        // Wealth accumulation
-        agent.wealth += agent.income * 0.1;  // save 10% of income
+        // Consumption (agents must spend to maintain wealth)
+        double consumption = std::min(agent.wealth, agent.income * 0.8);  // consume ~80% of income or available wealth
+        agent.wealth -= consumption;
+        
+        // Wealth accumulation from savings
+        agent.wealth += agent.income * 0.2;  // save 20% of income
+        
+        // Wealth can't go negative
+        agent.wealth = std::max(0.0, agent.wealth);
         
         // Economic system affects income distribution
         if (region.economic_system == "market") {
@@ -570,6 +594,118 @@ void Economy::evolveEconomicSystems(const std::vector<std::array<double, 4>>& re
             region.inequality = 0.28 + region.development * 0.04;
         }
     }
+}
+
+Economy::StartConditionProfile Economy::resolveStartCondition(const std::string& name) const {
+    auto normalize = [](const std::string& raw) {
+        std::string normalized;
+        normalized.reserve(raw.size());
+        for (unsigned char ch : raw) {
+            if (std::isalnum(ch)) {
+                normalized.push_back(static_cast<char>(std::tolower(ch)));
+            }
+        }
+        if (normalized.empty()) {
+            normalized = "baseline";
+        }
+        return normalized;
+    };
+
+    auto make_profile = [](const std::string& canonical,
+                           const std::array<double, kGoodTypes>& multipliers,
+                           double base_dev,
+                           double jitter,
+                           std::string default_system,
+                           double wealth_mean,
+                           double wealth_std,
+                           double prod_mean,
+                           double prod_std) {
+        StartConditionProfile profile;
+        profile.name = canonical;
+        profile.endowmentMultipliers = multipliers;
+        profile.baseDevelopment = base_dev;
+        profile.developmentJitter = jitter;
+        profile.defaultSystem = std::move(default_system);
+        profile.wealthLogMean = wealth_mean;
+        profile.wealthLogStd = wealth_std;
+        profile.productivityMean = prod_mean;
+        profile.productivityStd = prod_std;
+        return profile;
+    };
+
+    const std::string normalized = normalize(name);
+
+    if (normalized == "baseline") {
+        return make_profile("baseline",
+                            {1.0, 1.0, 1.0, 0.85, 0.95},
+                            0.8,
+                            0.25,
+                            "mixed",
+                            0.1,
+                            0.65,
+                            1.0,
+                            0.25);
+    }
+
+    if (normalized == "postscarcity" || normalized == "abundance" || normalized == "utopia") {
+        return make_profile("postscarcity",
+                            {1.2, 1.1, 1.05, 1.35, 1.45},
+                            2.4,
+                            0.15,
+                            "cooperative",
+                            0.3,
+                            0.35,
+                            1.2,
+                            0.2);
+    }
+
+    if (normalized == "feudal" || normalized == "agrarian" || normalized == "lowtech") {
+        return make_profile("feudal",
+                            {1.4, 0.6, 0.4, 0.2, 0.25},
+                            0.35,
+                            0.08,
+                            "feudal",
+                            -0.7,
+                            1.05,
+                            0.75,
+                            0.35);
+    }
+
+    if (normalized == "industrial" || normalized == "industrializing" || normalized == "boom") {
+        return make_profile("industrial",
+                            {0.9, 1.25, 1.35, 0.9, 0.95},
+                            1.4,
+                            0.30,
+                            "market",
+                            0.15,
+                            0.55,
+                            1.1,
+                            0.35);
+    }
+
+    if (normalized == "crisis" || normalized == "collapse" || normalized == "depression") {
+        return make_profile("crisis",
+                            {0.65, 0.7, 0.75, 0.55, 0.6},
+                            0.6,
+                            0.2,
+                            "mixed",
+                            -0.2,
+                            0.9,
+                            0.9,
+                            0.4);
+    }
+
+    std::cerr << "[Economy] Unknown start condition '" << name
+              << "'. Falling back to 'baseline'.\n";
+    return make_profile("baseline",
+                        {1.0, 1.0, 1.0, 0.85, 0.95},
+                        0.8,
+                        0.25,
+                        "mixed",
+                        0.1,
+                        0.65,
+                        1.0,
+                        0.25);
 }
 
 std::string Economy::determineEconomicSystem(const std::array<double, 4>& beliefs,

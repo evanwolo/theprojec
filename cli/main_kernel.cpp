@@ -10,12 +10,14 @@
 #include <algorithm>
 #include <map>
 #include <filesystem>
+#include <cstdlib>
 
 static void printHelp() {
     std::cerr << "Kernel Commands:\n"
               << "  step N             # advance N steps\n"
               << "  state [traits]     # print JSON snapshot (optional: include traits)\n"
               << "  metrics            # print current metrics\n"
+              << "  stats              # print detailed statistics (demographics, networks, beliefs)\n"
               << "  reset [N R k p]    # reset with optional: pop, regions, k, rewire_p\n"
               << "  run T log          # run T ticks, log metrics every 'log' steps\n"
               << "  cluster kmeans K   # detect K cultures via K-means\n"
@@ -27,7 +29,8 @@ static void printHelp() {
               << "  detect_movements   # detect movements from last clustering\n"
               << "  movements          # list active movements with stats\n"
               << "  movement ID        # show detailed info for movement ID\n"
-              << "  quit               # exit\n";
+              << "  quit               # exit\n"
+              << "\nOptions: use --start=<profile> or SIM_START_CONDITION env var to choose economic start\n";
 }
 
 static void printClusters(const std::vector<Cluster>& clusters, const Kernel& kernel) {
@@ -95,6 +98,27 @@ int main(int argc, char** argv) {
     cfg.rewireProb = 0.05;
     cfg.stepSize = 0.15;
     cfg.demographyEnabled = true;  // Re-enable for debugging
+
+    if (const char* envStart = std::getenv("SIM_START_CONDITION")) {
+        cfg.startCondition = envStart;
+    }
+
+    const char* scriptArg = nullptr;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg.rfind("--start=", 0) == 0) {
+            cfg.startCondition = arg.substr(8);
+        } else if (arg == "--help" || arg == "-h") {
+            printHelp();
+            return 0;
+        } else if (arg.size() && arg[0] == '-' ) {
+            std::cerr << "Unknown option: " << arg << "\n";
+            return 1;
+        } else {
+            scriptArg = argv[i];
+            break;
+        }
+    }
     
     Kernel kernel(cfg);
     
@@ -102,15 +126,14 @@ int main(int argc, char** argv) {
     std::istream* input = &std::cin;
     std::ifstream scriptFile;
     
-    if (argc > 1) {
-        // Run from script file
-        scriptFile.open(argv[1]);
+    if (scriptArg) {
+        scriptFile.open(scriptArg);
         if (!scriptFile.is_open()) {
-            std::cerr << "Error: Could not open script file '" << argv[1] << "'\n";
+            std::cerr << "Error: Could not open script file '" << scriptArg << "'\n";
             return 1;
         }
         input = &scriptFile;
-        std::cerr << "Running commands from script file: " << argv[1] << "\n";
+        std::cerr << "Running commands from script file: " << scriptArg << "\n";
     } else {
         // Interactive mode
         std::ios::sync_with_stdio(false);
@@ -193,22 +216,112 @@ int main(int argc, char** argv) {
                       << "Global Hardship: " << m.globalHardship << "\n";
             std::cout.flush();
             
+        } else if (cmd == "stats") {
+            try {
+                auto stats = kernel.getStatistics();
+                std::cout << "\n=== SIMULATION STATISTICS (Generation " << kernel.generation() << ") ===\n\n";
+                
+                if (stats.aliveAgents == 0) {
+                    std::cout << "No alive agents!\n";
+                    std::cout.flush();
+                    continue;
+                }
+                
+                // Population Overview
+                std::cout << "--- POPULATION ---\n";
+                std::cout << "Total agents: " << stats.totalAgents << "\n";
+                std::cout << "Alive agents: " << stats.aliveAgents << "\n";
+                std::cout << "Age range: " << stats.minAge << " - " << stats.maxAge << " years\n";
+                std::cout << "Average age: " << std::fixed << std::setprecision(1) << stats.avgAge << " years\n\n";
+            
+            // Demographics by Age
+            std::cout << "--- AGE DISTRIBUTION ---\n";
+            std::cout << "Children (0-14):     " << std::setw(6) << stats.children 
+                      << " (" << std::setprecision(1) << (100.0 * stats.children / stats.aliveAgents) << "%)\n";
+            std::cout << "Young Adults (15-29): " << std::setw(6) << stats.youngAdults 
+                      << " (" << std::setprecision(1) << (100.0 * stats.youngAdults / stats.aliveAgents) << "%)\n";
+            std::cout << "Middle Age (30-49):  " << std::setw(6) << stats.middleAge 
+                      << " (" << std::setprecision(1) << (100.0 * stats.middleAge / stats.aliveAgents) << "%)\n";
+            std::cout << "Mature (50-69):      " << std::setw(6) << stats.mature 
+                      << " (" << std::setprecision(1) << (100.0 * stats.mature / stats.aliveAgents) << "%)\n";
+            std::cout << "Elderly (70+):       " << std::setw(6) << stats.elderly 
+                      << " (" << std::setprecision(1) << (100.0 * stats.elderly / stats.aliveAgents) << "%)\n\n";
+            
+            // Gender
+            std::cout << "--- GENDER ---\n";
+            std::cout << "Males:   " << std::setw(6) << stats.males 
+                      << " (" << std::setprecision(1) << (100.0 * stats.males / stats.aliveAgents) << "%)\n";
+            std::cout << "Females: " << std::setw(6) << stats.females 
+                      << " (" << std::setprecision(1) << (100.0 * stats.females / stats.aliveAgents) << "%)\n\n";
+            
+            // Network
+            std::cout << "--- SOCIAL NETWORK ---\n";
+            std::cout << "Avg connections: " << std::setprecision(2) << stats.avgConnections << "\n";
+            std::cout << "Isolated agents: " << stats.isolatedAgents 
+                      << " (" << std::setprecision(1) << (100.0 * stats.isolatedAgents / stats.aliveAgents) << "%)\n\n";
+            
+            // Beliefs
+            std::cout << "--- BELIEFS ---\n";
+            std::cout << "Polarization: " << std::setprecision(4) << stats.polarizationMean 
+                      << " (±" << stats.polarizationStd << ")\n";
+            std::cout << "Average beliefs:\n";
+            std::cout << "  Authority-Liberty: " << std::setprecision(3) << stats.avgBeliefs[0] << "\n";
+            std::cout << "  Tradition-Progress: " << stats.avgBeliefs[1] << "\n";
+            std::cout << "  Hierarchy-Equality: " << stats.avgBeliefs[2] << "\n";
+            std::cout << "  Isolation-Unity: " << stats.avgBeliefs[3] << "\n\n";
+            
+            // Regional Distribution
+            std::cout << "--- REGIONAL DISTRIBUTION ---\n";
+            std::cout << "Occupied regions: " << stats.occupiedRegions << " / " << cfg.regions << "\n";
+            std::cout << "Avg population per region: " << std::setprecision(1) << stats.avgPopPerRegion << "\n";
+            std::cout << "Min region population: " << stats.minRegionPop << "\n";
+            std::cout << "Max region population: " << stats.maxRegionPop << "\n\n";
+            
+            // Economy
+            std::cout << "--- ECONOMY ---\n";
+            std::cout << "Global welfare: " << std::setprecision(3) << stats.globalWelfare << "\n";
+            std::cout << "Global inequality: " << stats.globalInequality << "\n";
+            std::cout << "Average income: " << std::setprecision(2) << stats.avgIncome << "\n\n";
+            
+            // Languages
+            std::cout << "--- LANGUAGES ---\n";
+            std::cout << "Active languages: " << static_cast<int>(stats.numLanguages) << "\n";
+            for (int i = 0; i < 256; ++i) {
+                if (stats.langCounts[i] > 0) {
+                    std::cout << "  Language " << static_cast<int>(i) << ": " 
+                              << stats.langCounts[i] << " speakers"
+                              << " (" << std::setprecision(1) 
+                              << (100.0 * stats.langCounts[i] / stats.aliveAgents) << "%)\n";
+                }
+            }
+            std::cout << "\n";
+            std::cout.flush();
+            } catch (const std::exception& e) {
+                std::cerr << "Error in stats command: " << e.what() << "\n";
+            }
+            
         } else if (cmd == "reset") {
             std::uint32_t N = cfg.population;
             std::uint32_t R = cfg.regions;
             std::uint32_t k = cfg.avgConnections;
             double p = cfg.rewireProb;
             iss >> N >> R >> k >> p;
+            std::string startCond;
+            if (iss >> startCond) {
+                cfg.startCondition = startCond;
+            }
             
             KernelConfig newCfg = cfg;
             newCfg.population = N;
             newCfg.regions = R;
             newCfg.avgConnections = k;
             newCfg.rewireProb = p;
+            newCfg.startCondition = cfg.startCondition;
             
             kernel.reset(newCfg);
             g_lastClusters.clear();
-            std::cout << "Reset: " << N << " agents, " << R << " regions\n";
+            std::cout << "Reset: " << N << " agents, " << R << " regions (start="
+                      << newCfg.startCondition << ")\n";
             std::cout.flush();
             
         } else if (cmd == "run") {
@@ -492,3 +605,5 @@ int main(int argc, char** argv) {
     
     return 0;
 }
+
+

@@ -1,4 +1,0 @@
-run 500 100
-metrics
-economy
-quit
