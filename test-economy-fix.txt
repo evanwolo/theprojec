@@ -1,3 +1,0 @@
-run 100 100
-economy
-quit

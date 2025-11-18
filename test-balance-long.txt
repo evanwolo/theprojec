@@ -1,9 +1,0 @@
-run 3000 500
-economy
-region 0
-region 50
-region 100
-region 150
-region 199
-classes
-quit

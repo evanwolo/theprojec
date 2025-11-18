@@ -20,6 +20,12 @@ struct KernelConfig {
     double stepSize = 0.15;             // eta (global influence rate)
     double simFloor = 0.05;             // minimum similarity gate
     std::uint64_t seed = 42;
+    
+    // Demography
+    int ticksPerYear = 10;              // age granularity
+    int maxAgeYears = 90;               // hard cap on lifespan
+    double regionCapacity = 500.0;      // target population per region
+    bool demographyEnabled = true;      // enable births/deaths
 };
 
 // ---------- Agent Structure ----------
@@ -27,6 +33,11 @@ struct Agent {
     // Identity
     std::uint32_t id = 0;
     std::uint32_t region = 0;
+    bool alive = true;
+    
+    // Demography
+    int age = 0;                        // in years (tick-based)
+    bool female = false;
     
     // Lineage (Phase 2 integration point)
     std::int32_t parent_a = -1;
@@ -101,6 +112,15 @@ private:
     void initAgents();
     void buildSmallWorld();
     void updateBeliefs();
+    
+    // Demography
+    void stepDemography();
+    void createChild(std::uint32_t motherId);
+    void compactDeadAgents();
+    double mortalityRate(int age) const;
+    double mortalityPerTick(int age) const;
+    double fertilityRateAnnual(int age) const;
+    double fertilityPerTick(int age) const;
 
     KernelConfig cfg_;
     std::vector<Agent> agents_;

@@ -1,4 +1,0 @@
-reset 50000 200 8 0.03
-run 10000 1000
-state
-quit

@@ -1,4 +1,0 @@
-run 500 500
-economy
-classes
-quit

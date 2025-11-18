@@ -1,6 +1,0 @@
-run 100 100
-economy
-region 0
-region 1
-region 50
-quit

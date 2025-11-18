@@ -1,5 +1,0 @@
-step 1000
-cluster kmeans 5
-detect_movements
-movements
-quit

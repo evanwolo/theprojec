@@ -34,11 +34,19 @@ void Kernel::initAgents() {
     std::uniform_real_distribution<double> uniDist(0.0, 1.0);
     std::uniform_int_distribution<std::uint32_t> regionDist(0, cfg_.regions - 1);
     std::uniform_int_distribution<std::uint8_t> langDist(0, 3);  // 4 base languages
+    std::uniform_int_distribution<int> ageDist(15, 60);  // Initial population: working age adults
+    std::bernoulli_distribution sexDist(0.5);  // 50/50 male/female
     
     for (std::uint32_t i = 0; i < cfg_.population; ++i) {
         Agent a;
         a.id = i;
         a.region = regionDist(rng_);
+        a.alive = true;
+        
+        // Demography: initial population is working-age adults
+        a.age = ageDist(rng_);
+        a.female = sexDist(rng_);
+        
         a.primaryLang = langDist(rng_);
         a.fluency = 0.7 + 0.3 * (uniDist(rng_) - 0.5);
         
@@ -151,6 +159,8 @@ void Kernel::updateBeliefs() {
     #pragma omp parallel for schedule(dynamic)
     for (std::size_t i = 0; i < n; ++i) {
         const auto& ai = agents_[i];
+        if (!ai.alive) continue;  // Skip dead agents
+        
         std::array<double, 4> acc{0, 0, 0, 0};
         
         // Cache agent properties used in inner loop
@@ -158,7 +168,9 @@ void Kernel::updateBeliefs() {
         const double ai_comm = ai.m_comm;
         
         for (auto jid : ai.neighbors) {
+            if (jid >= agents_.size()) continue;  // Safety check
             const auto& aj = agents_[jid];
+            if (!aj.alive) continue;  // Skip dead neighbors
             
             double s = similarityGate(ai, aj);
             double lq = languageQuality(ai, aj);
@@ -178,6 +190,8 @@ void Kernel::updateBeliefs() {
     // Apply updates
     #pragma omp parallel for
     for (std::size_t i = 0; i < n; ++i) {
+        if (!agents_[i].alive) continue;  // Skip dead agents
+        
         agents_[i].x[0] += dx[i][0];
         agents_[i].x[1] += dx[i][1];
         agents_[i].x[2] += dx[i][2];
@@ -200,6 +214,11 @@ void Kernel::step() {
     updateBeliefs();
     ++generation_;
     
+    // Demographic step (if enabled)
+    if (cfg_.demographyEnabled) {
+        stepDemography();
+    }
+    
     // Update economy every 10 ticks (reduce overhead)
     if (generation_ % 10 == 0) {
         // Build population counts and belief centroids per region
@@ -213,6 +232,7 @@ void Kernel::step() {
         
         // Accumulate beliefs per region
         for (const auto& agent : agents_) {
+            if (!agent.alive) continue;  // Skip dead agents
             region_populations[agent.region]++;
             region_belief_centroids[agent.region][0] += agent.B[0];
             region_belief_centroids[agent.region][1] += agent.B[1];
@@ -235,6 +255,7 @@ void Kernel::step() {
         
         // Apply economic feedback to agent beliefs and susceptibility
         for (auto& agent : agents_) {
+            if (!agent.alive) continue;  // Skip dead agents
             const auto& regional_econ = economy_.getRegion(agent.region);
             const auto& agent_econ = economy_.getAgentEconomy(agent.id);
             
@@ -377,3 +398,230 @@ Kernel::Metrics Kernel::computeMetrics() const {
     
     return m;
 }
+
+// ============================================================================
+// DEMOGRAPHY IMPLEMENTATION
+// ============================================================================
+
+double Kernel::mortalityRate(int age) const {
+    // Age-specific mortality (annual probability)
+    if (age < 5)   return 0.01;   // 1% child mortality
+    if (age < 15)  return 0.001;  // 0.1% youth
+    if (age < 50)  return 0.002;  // 0.2% adult
+    if (age < 70)  return 0.01;   // 1% middle age
+    if (age < 85)  return 0.05;   // 5% elderly
+    return 0.15;                   // 15% very old
+}
+
+double Kernel::mortalityPerTick(int age) const {
+    double annual = mortalityRate(age);
+    // Convert annual probability to per-tick: 1 - (1 - p)^(1/ticksPerYear)
+    return 1.0 - std::pow(1.0 - annual, 1.0 / cfg_.ticksPerYear);
+}
+
+double Kernel::fertilityRateAnnual(int age) const {
+    // Age-specific fertility for females (annual probability)
+    if (age < 15)  return 0.0;
+    if (age < 20)  return 0.05;   // 5% for teens
+    if (age < 30)  return 0.12;   // 12% peak fertility
+    if (age < 35)  return 0.10;   // 10% 
+    if (age < 40)  return 0.05;   // 5% declining
+    if (age < 45)  return 0.02;   // 2% late fertility
+    return 0.0;
+}
+
+double Kernel::fertilityPerTick(int age) const {
+    double annual = fertilityRateAnnual(age);
+    return 1.0 - std::pow(1.0 - annual, 1.0 / cfg_.ticksPerYear);
+}
+
+void Kernel::stepDemography() {
+    // Age increment every ticksPerYear ticks
+    bool ageIncrement = (generation_ % cfg_.ticksPerYear == 0);
+    
+    std::vector<std::uint32_t> newBirths;
+    std::bernoulli_distribution d(0.5);
+    
+    // Process deaths and births
+    for (auto& agent : agents_) {
+        if (!agent.alive) continue;
+        
+        // Age increment
+        if (ageIncrement) {
+            agent.age++;
+            // Hard cap on age
+            if (agent.age > cfg_.maxAgeYears) {
+                agent.alive = false;
+                continue;
+            }
+        }
+        
+        // Mortality
+        double pDeath = mortalityPerTick(agent.age);
+        d = std::bernoulli_distribution(pDeath);
+        if (d(rng_)) {
+            agent.alive = false;
+            continue;
+        }
+        
+        // Fertility (only for alive females)
+        if (agent.female && agent.alive) {
+            double pBirth = fertilityPerTick(agent.age);
+            
+            // Modulate by regional conditions
+            const auto& regional_econ = economy_.getRegion(agent.region);
+            double hardship = regional_econ.hardship;
+            
+            // Reduce fertility under extreme hardship
+            pBirth *= (0.7 + 0.3 * (1.0 - hardship));
+            
+            // Carrying capacity pressure
+            double regionPop = static_cast<double>(regionIndex_[agent.region].size());
+            double capacity = cfg_.regionCapacity;
+            if (regionPop > capacity) {
+                double pressure = regionPop / capacity;
+                pBirth /= pressure;  // Reduce fertility in overpopulated regions
+            }
+            
+            d = std::bernoulli_distribution(pBirth);
+            if (d(rng_)) {
+                newBirths.push_back(agent.id);
+            }
+        }
+    }
+    
+    // Create children
+    for (auto motherId : newBirths) {
+        createChild(motherId);
+    }
+    
+    // Periodically compact dead agents (every 100 ticks to avoid overhead)
+    if (generation_ % 100 == 0) {
+        compactDeadAgents();
+    }
+}
+
+void Kernel::createChild(std::uint32_t motherId) {
+    if (motherId >= agents_.size()) return;
+    
+    Agent& mother = agents_[motherId];
+    if (!mother.alive) return;
+    
+    Agent child;
+    child.id = static_cast<std::uint32_t>(agents_.size());
+    child.alive = true;
+    child.age = 0;
+    
+    // Sex (50/50)
+    std::bernoulli_distribution sexDist(0.5);
+    child.female = sexDist(rng_);
+    
+    // Parents
+    child.parent_a = static_cast<std::int32_t>(motherId);
+    
+    // Select father from mother's neighbors or region
+    std::int32_t fatherId = -1;
+    if (!mother.neighbors.empty()) {
+        std::uniform_int_distribution<std::size_t> neighborDist(0, mother.neighbors.size() - 1);
+        fatherId = static_cast<std::int32_t>(mother.neighbors[neighborDist(rng_)]);
+        // Verify father is alive and male
+        if (fatherId >= 0 && fatherId < static_cast<std::int32_t>(agents_.size())) {
+            if (!agents_[fatherId].alive || agents_[fatherId].female) {
+                fatherId = -1;  // Invalid father
+            }
+        }
+    }
+    child.parent_b = fatherId;
+    
+    // Lineage: inherit from mother (matrilineal) or could use patrilineal/mixed
+    child.lineage_id = mother.lineage_id;
+    
+    // Region: same as mother
+    child.region = mother.region;
+    
+    // Language: inherit from mother
+    child.primaryLang = mother.primaryLang;
+    child.fluency = 0.5;  // will grow with age/exposure
+    
+    // Traits: genetic inheritance with mutation
+    Agent* father = (fatherId >= 0 && fatherId < static_cast<std::int32_t>(agents_.size())) 
+                    ? &agents_[fatherId] : nullptr;
+    
+    std::normal_distribution<double> mutationNoise(0.0, 0.05);
+    auto inherit = [&](double mTrait, double fTrait) -> double {
+        double base = father ? 0.5 * (mTrait + fTrait) : mTrait;
+        double trait = base + mutationNoise(rng_);
+        return std::clamp(trait, 0.0, 1.0);
+    };
+    
+    child.openness = inherit(mother.openness, father ? father->openness : mother.openness);
+    child.conformity = inherit(mother.conformity, father ? father->conformity : mother.conformity);
+    child.assertiveness = inherit(mother.assertiveness, father ? father->assertiveness : mother.assertiveness);
+    child.sociality = inherit(mother.sociality, father ? father->sociality : mother.sociality);
+    
+    // Beliefs: cultural transmission from parents with noise
+    std::normal_distribution<double> beliefNoise(0.0, 0.2);
+    for (int k = 0; k < 4; ++k) {
+        double baseB = mother.B[k];
+        if (father) {
+            baseB = 0.5 * (mother.B[k] + father->B[k]);
+        }
+        child.B[k] = std::clamp(baseB + beliefNoise(rng_), -1.0, 1.0);
+        // Convert B to internal state x = atanh(B)
+        double B_clamped = std::clamp(child.B[k], -0.99, 0.99);
+        child.x[k] = std::atanh(B_clamped);
+    }
+    child.B_norm_sq = child.B[0]*child.B[0] + child.B[1]*child.B[1] + 
+                      child.B[2]*child.B[2] + child.B[3]*child.B[3];
+    
+    // Module multipliers
+    child.m_comm = 1.0;
+    child.m_susceptibility = 0.7 + 0.6 * (child.openness - 0.5);
+    child.m_mobility = 0.8 + 0.4 * child.sociality;
+    
+    // Network: connect to mother and some of her neighbors
+    child.neighbors.clear();
+    child.neighbors.push_back(motherId);
+    mother.neighbors.push_back(child.id);  // Reciprocal link
+    
+    // Inherit some neighbors from mother (family network)
+    std::uniform_int_distribution<std::size_t> neighborSelectDist(0, mother.neighbors.size() - 1);
+    int neighborCount = std::min(3, static_cast<int>(mother.neighbors.size()));
+    for (int i = 0; i < neighborCount; ++i) {
+        std::uint32_t neighborId = mother.neighbors[neighborSelectDist(rng_)];
+        if (neighborId != child.id && neighborId < agents_.size()) {
+            child.neighbors.push_back(neighborId);
+            agents_[neighborId].neighbors.push_back(child.id);
+        }
+    }
+    
+    // Add to containers
+    agents_.push_back(child);
+    regionIndex_[child.region].push_back(child.id);
+}
+
+void Kernel::compactDeadAgents() {
+    // Remove dead agents from regionIndex
+    for (auto& region : regionIndex_) {
+        region.erase(
+            std::remove_if(region.begin(), region.end(), 
+                [this](std::uint32_t id) { 
+                    return id >= agents_.size() || !agents_[id].alive; 
+                }),
+            region.end()
+        );
+    }
+    
+    // Remove dead agents from neighbor lists
+    for (auto& agent : agents_) {
+        if (!agent.alive) continue;
+        agent.neighbors.erase(
+            std::remove_if(agent.neighbors.begin(), agent.neighbors.end(),
+                [this](std::uint32_t id) {
+                    return id >= agents_.size() || !agents_[id].alive;
+                }),
+            agent.neighbors.end()
+        );
+    }
+}
+
