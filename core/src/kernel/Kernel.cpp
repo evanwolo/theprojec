@@ -1,4 +1,5 @@
 #include "kernel/Kernel.h"
+#include "kernel/AgentStorage.h"
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -244,7 +245,18 @@ void Kernel::updateBeliefs() {
 }
 
 void Kernel::step() {
-    updateBeliefs();
+    // 1. Sync Legacy -> SoA (Prepare for Physics)
+    // This copies the current state of agents into the contiguous arrays
+    gpu_storage_.syncFromLegacy(agents_);
+
+    // 2. Run the High-Performance Physics
+    // This replaces the old updateBeliefs() call
+    updateBeliefsSoA();
+
+    // 3. Sync SoA -> Legacy (Commit changes)
+    // This copies the new B0-B3 values back so Economy/Demography can see them
+    gpu_storage_.syncToLegacy(agents_);
+
     ++generation_;
     
     // Demographic step (if enabled)
