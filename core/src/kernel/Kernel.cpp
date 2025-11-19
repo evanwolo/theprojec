@@ -83,6 +83,12 @@ void Kernel::initAgents() {
         a.assertiveness = std::clamp(traitDist(rng_), 0.0, 1.0);
         a.sociality = std::clamp(traitDist(rng_), 0.0, 1.0);
         
+        // Every 100th agent is a potential charismatic leader
+        if (i % 100 == 0) {
+            std::uniform_real_distribution<double> charismaticDist(0.8, 0.95);
+            a.assertiveness = charismaticDist(rng_);
+        }
+        
         // Initial beliefs
         for (int k = 0; k < 4; ++k) {
             a.x[k] = xDist(rng_);
@@ -350,6 +356,12 @@ void Kernel::step() {
     // Update health and psychology every tick using latest economic signals
     health_.updateAgents(agents_, economy_, generation_);
     psychology_.updateAgents(agents_, economy_, generation_);
+    
+    // Auto-detect movements every 100 ticks
+    if (generation_ % 100 == 0) {
+        auto clusters = culture_.detectCultures(agents_, 8, 50, 0.5);
+        movements_.update(*this, clusters, generation_);
+    }
 }
 
 void Kernel::stepN(int n) {

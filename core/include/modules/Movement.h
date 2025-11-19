@@ -55,14 +55,14 @@ struct Movement {
 
 // Formation thresholds
 struct MovementFormationConfig {
-    std::uint32_t minSize = 100;
-    double minCoherence = 0.7;
-    double minCharismaDensity = 0.6;
+    std::uint32_t minSize = 50;          // Lowered from 100
+    double minCoherence = 0.6;           // Lowered from 0.7
+    double minCharismaDensity = 0.05;    // Lowered from 0.6
     double minMomentum = 0.0;  // Future: growth-based formation
     
     // Economic triggers
-    double hardshipThreshold = 0.5;      // Form at high hardship
-    double inequalityThreshold = 0.6;    // Form at high inequality
+    double hardshipThreshold = 0.4;      // Lowered from 0.5
+    double inequalityThreshold = 0.5;    // Lowered from 0.6
 };
 
 // Movement module
