@@ -5,9 +5,16 @@ services:
   kernel:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: Dockerfile
     image: grand-strategy-kernel:latest
     container_name: kernel-sim
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     stdin_open: true
     tty: true
     volumes:
@@ -21,9 +28,16 @@ services:
   batch:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: Dockerfile
     image: grand-strategy-kernel:latest
     container_name: kernel-batch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     volumes:
       - ../data:/app/data
     environment:
@@ -40,7 +54,7 @@ services:
   legacy:
     build:
       context: ..
-      dockerfile: docker/Dockerfile
+      dockerfile: Dockerfile
     image: grand-strategy-kernel:latest
     container_name: opinion-sim
     stdin_open: true

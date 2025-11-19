@@ -37,6 +37,7 @@ void Kernel::reset(const KernelConfig& cfg) {
     health_.configure(cfg_.regions, cfg_.seed ^ 0xBF58476D1CE4E5B9ULL);
     initAgents();
     buildSmallWorld();
+    initEconomicSystems();
     
     // Initialize economy with regions and agents
     economy_.init(cfg_.regions, cfg_.population, rng_, cfg_.startCondition);
@@ -342,23 +343,14 @@ void Kernel::step() {
                 agent.B[2] += econ_pressure * 0.5;  // Equality → Hierarchy
             }
             
-            // Economic system shapes ideology
-            if (regional_econ.economic_system == "market") {
-                // Market economy → favor liberty, accept hierarchy
-                agent.B[0] -= econ_pressure * 0.3;  // → Liberty
-                agent.B[2] += econ_pressure * 0.2;  // → Hierarchy
-            } else if (regional_econ.economic_system == "planned") {
-                // Planned economy → favor authority, demand equality
-                agent.B[0] += econ_pressure * 0.3;  // → Authority
-                agent.B[2] -= econ_pressure * 0.3;  // → Equality
-            } else if (regional_econ.economic_system == "feudal") {
-                // Feudal system → tradition and hierarchy dominate
-                agent.B[1] += econ_pressure * 0.4;  // → Tradition
-                agent.B[2] += econ_pressure * 0.4;  // → Hierarchy
-            } else if (regional_econ.economic_system == "cooperative") {
-                // Cooperative → equality and local autonomy
-                agent.B[2] -= econ_pressure * 0.3;  // → Equality
-                agent.B[0] -= econ_pressure * 0.2;  // → Liberty
+            // Economic system shapes ideology (Data-Driven)
+            auto it = econ_systems_.find(regional_econ.economic_system);
+            if (it != econ_systems_.end()) {
+                const auto& mods = it->second.modifiers;
+                agent.B[0] += econ_pressure * mods.authority_delta;
+                agent.B[1] += econ_pressure * mods.tradition_delta;
+                agent.B[2] += econ_pressure * mods.hierarchy_delta;
+                agent.B[3] += econ_pressure * mods.religiosity_delta;
             }
             
             // Low welfare → reject tradition (demand change)
@@ -1023,110 +1015,103 @@ Kernel::Statistics Kernel::getStatistics() const {
     return stats;
 }
 
-// Helper for the physics (inline so it can potentially be shared)
-// This matches the logic in your Kernel.h
+// Helper for the SoA physics
 inline double fastTanhSoA(double x) {
     double x2 = x * x;
     return x * (27.0 + x2) / (27.0 + 9.0 * x2);
 }
 
 void Kernel::updateBeliefsSoA() {
-    // 1. Get the lightweight View (pointers only)
+    // 1. Get the lightweight View
     auto view = gpu_storage_.getView();
     const uint32_t count = view.count;
     const double stepSize = cfg_.stepSize;
 
-    // 2. Allocate Temporary Buffers for Deltas (Synchronous Update)
-    // In the future GPU version, this will be a pre-allocated GPU buffer.
+    // 2. Buffers for Deltas
     std::vector<double> d0(count, 0.0);
     std::vector<double> d1(count, 0.0);
     std::vector<double> d2(count, 0.0);
     std::vector<double> d3(count, 0.0);
 
-    // 3. Parallel Physics Loop (The Hot Path)
+    // 3. Parallel Physics Loop
     #pragma omp parallel for schedule(dynamic)
     for (uint32_t i = 0; i < count; ++i) {
-        // Load My State
         double myB0 = view.B0[i];
         double myB1 = view.B1[i];
         double myB2 = view.B2[i];
         double myB3 = view.B3[i];
-
-        // Calculate my Norm Squared (needed for similarity gate)
-        double myNormSq = myB0*myB0 + myB1*myB1 + myB2*myB2 + myB3*myB3;
-        
-        // Properties
         double mySusc = view.susceptibility[i];
         double myFluency = view.fluency[i];
-        // Note: If you didn't implement primaryLang arrays yet, 
-        // we simplify language logic to just fluency check for now.
+        double myNormSq = myB0*myB0 + myB1*myB1 + myB2*myB2 + myB3*myB3;
 
-        // Network Iteration (CSR Style)
         int start = view.neighbor_offsets[i];
         int end   = start + view.neighbor_counts[i];
 
-        double delta0 = 0.0, delta1 = 0.0, delta2 = 0.0, delta3 = 0.0;
+        double delta0=0, delta1=0, delta2=0, delta3=0;
 
         for (int idx = start; idx < end; ++idx) {
-            int neighborId = view.neighbor_indices[idx];
-
-            // Load Neighbor State
-            double theirB0 = view.B0[neighborId];
-            double theirB1 = view.B1[neighborId];
-            double theirB2 = view.B2[neighborId];
-            double theirB3 = view.B3[neighborId];
-            double theirNormSq = theirB0*theirB0 + theirB1*theirB1 + 
-                                 theirB2*theirB2 + theirB3*theirB3;
-
-            // --- Physics Logic ---
+            int nbrId = view.neighbor_indices[idx];
             
-            // 1. Similarity Gate
-            double dot = myB0*theirB0 + myB1*theirB1 + myB2*theirB2 + myB3*theirB3;
-            double normProd = myNormSq * theirNormSq;
-            double sim = 1.0; // Default if near zero
-            if (normProd > 1e-9) {
-                sim = dot / std::sqrt(normProd);
-            }
-            // Linear gate: 0 if < floor, 1 if > 1
+            double tB0 = view.B0[nbrId];
+            double tB1 = view.B1[nbrId];
+            double tB2 = view.B2[nbrId];
+            double tB3 = view.B3[nbrId];
+            
+            double dot = myB0*tB0 + myB1*tB1 + myB2*tB2 + myB3*tB3;
+            double tNormSq = tB0*tB0 + tB1*tB1 + tB2*tB2 + tB3*tB3;
+            
+            double sim = 1.0;
+            if (myNormSq * tNormSq > 1e-9) sim = dot / std::sqrt(myNormSq * tNormSq);
+            
             double gate = (sim - cfg_.simFloor) / (1.0 - cfg_.simFloor);
-            gate = std::max(0.0, gate);
+            if (gate <= 0.0) continue;
 
-            // 2. Language Cap (Simplified for SoA transition)
-            // Using generic fluency average as proxy for communication quality
-            double langQ = 0.5 * (myFluency + view.fluency[neighborId]);
-            
-            // 3. Final Weight
+            double langQ = 0.5 * (myFluency + view.fluency[nbrId]);
             double weight = stepSize * gate * langQ * mySusc;
 
-            // 4. Accumulate Force
-            if (weight > 1e-6) {
-                delta0 += weight * fastTanhSoA(theirB0 - myB0);
-                delta1 += weight * fastTanhSoA(theirB1 - myB1);
-                delta2 += weight * fastTanhSoA(theirB2 - myB2);
-                delta3 += weight * fastTanhSoA(theirB3 - myB3);
-            }
+            delta0 += weight * fastTanhSoA(tB0 - myB0);
+            delta1 += weight * fastTanhSoA(tB1 - myB1);
+            delta2 += weight * fastTanhSoA(tB2 - myB2);
+            delta3 += weight * fastTanhSoA(tB3 - myB3);
         }
-
-        // Store deltas
-        d0[i] = delta0;
-        d1[i] = delta1;
-        d2[i] = delta2;
-        d3[i] = delta3;
+        d0[i] = delta0; d1[i] = delta1; d2[i] = delta2; d3[i] = delta3;
     }
 
     // 4. Apply Deltas
     #pragma omp parallel for
     for (uint32_t i = 0; i < count; ++i) {
-        view.B0[i] += d0[i];
-        view.B1[i] += d1[i];
-        view.B2[i] += d2[i];
-        view.B3[i] += d3[i];
-        
-        // Clamping (keep beliefs valid)
-        view.B0[i] = std::max(-1.0, std::min(1.0, view.B0[i]));
-        view.B1[i] = std::max(-1.0, std::min(1.0, view.B1[i]));
-        view.B2[i] = std::max(-1.0, std::min(1.0, view.B2[i]));
-        view.B3[i] = std::max(-1.0, std::min(1.0, view.B3[i]));
+        view.B0[i] = std::max(-1.0, std::min(1.0, view.B0[i] + d0[i]));
+        view.B1[i] = std::max(-1.0, std::min(1.0, view.B1[i] + d1[i]));
+        view.B2[i] = std::max(-1.0, std::min(1.0, view.B2[i] + d2[i]));
+        view.B3[i] = std::max(-1.0, std::min(1.0, view.B3[i] + d3[i]));
     }
+}
+
+void Kernel::initEconomicSystems() {
+    econ_systems_.clear();
+
+    // Market: Favor Liberty (-B0), Accept Hierarchy (+B2)
+    econ_systems_["market"] = {
+        "market",
+        { -0.3, 0.0, 0.2, 0.0 } // authority_delta, tradition_delta, hierarchy_delta, religiosity_delta
+    };
+
+    // Planned: Favor Authority (+B0), Demand Equality (-B2)
+    econ_systems_["planned"] = {
+        "planned",
+        { 0.3, 0.0, -0.3, 0.0 }
+    };
+
+    // Feudal: Tradition (+B1), Hierarchy (+B2)
+    econ_systems_["feudal"] = {
+        "feudal",
+        { 0.0, 0.4, 0.4, 0.0 }
+    };
+
+    // Cooperative: Equality (-B2), Liberty (-B0)
+    econ_systems_["cooperative"] = {
+        "cooperative",
+        { -0.2, 0.0, -0.3, 0.0 }
+    };
 }
 

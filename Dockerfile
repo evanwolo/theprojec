@@ -1,10 +1,12 @@
-# Multi-stage build for Grand Strategy Simulation Engine
-FROM gcc:13 AS builder
+# Multi-stage build for Grand Strategy Simulation Engine (GPU Enabled)
+FROM nvidia/cuda:12.3.1-devel-ubuntu22.04 AS builder
 
-# Install CMake and OpenMP
+# Install CMake and dependencies
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     cmake \
-    make \
+    build-essential \
+    git \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -20,11 +22,10 @@ COPY tests/ ./tests/
 # Build the application
 RUN mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build . --target KernelSim && \
-    strip KernelSim
+    cmake --build . --target KernelSim --parallel $(nproc)
 
-# Runtime stage - debian with full gcc runtime
-FROM debian:bookworm-slim
+# Runtime stage - CUDA runtime
+FROM nvidia/cuda:12.3.1-runtime-ubuntu22.04
 
 # Install basic runtime dependencies (OpenMP)
 RUN apt-get update && apt-get install -y \
@@ -38,14 +39,11 @@ RUN mkdir -p /app/data
 # Copy built executable from builder
 COPY --from=builder /app/build/KernelSim /app/
 
-# Copy newer libstdc++ from gcc:13 builder to ensure compatibility
-COPY --from=builder /usr/local/lib64/libstdc++.so.6 /usr/lib/x86_64-linux-gnu/
-
 # Create non-root user and set permissions
 RUN useradd -m -u 1000 simuser && \
     chown -R simuser:simuser /app
 
 USER simuser
 
-# Default command (can be overridden)
+# Default command
 CMD ["/app/KernelSim"]

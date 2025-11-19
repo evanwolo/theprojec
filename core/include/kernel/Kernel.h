@@ -30,6 +30,18 @@ struct KernelConfig {
     bool demographyEnabled = true;      // enable births/deaths
 };
 
+struct BeliefModifier {
+    double authority_delta = 0.0;
+    double tradition_delta = 0.0;
+    double hierarchy_delta = 0.0;
+    double isolation_delta = 0.0;
+};
+
+struct EconomicSystemDef {
+    std::string name;
+    BeliefModifier modifiers;
+};
+
 #include "kernel/Agent.h"
 #include "kernel/AgentStorage.h"
 
@@ -148,6 +160,9 @@ private:
     
     // The new optimized update function
     void updateBeliefsSoA(); 
+
+    std::unordered_map<std::string, EconomicSystemDef> econ_systems_;
+    void initEconomicSystems();
 
     std::vector<std::vector<std::uint32_t>> regionIndex_;  // region -> agent IDs
     std::uint64_t generation_ = 0;
