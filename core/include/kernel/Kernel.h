@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <string>
 #include <random>
+#include <unordered_map>
 #include "modules/Economy.h"
 #include "modules/Psychology.h"
 #include "modules/Health.h"
@@ -28,6 +29,11 @@ struct KernelConfig {
     int maxAgeYears = 90;               // hard cap on lifespan
     double regionCapacity = 500.0;      // target population per region
     bool demographyEnabled = true;      // enable births/deaths
+
+    // Movement detection controls
+    bool detectMovements = true;
+    std::uint32_t movementClusteringPeriod = 100;
+    std::uint32_t movementClusteringSampleSize = 5000;  // limit DBSCAN workload
 };
 
 struct BeliefModifier {

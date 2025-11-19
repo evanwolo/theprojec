@@ -1,5 +1,6 @@
 #include "kernel/Kernel.h"
 #include "kernel/AgentStorage.h"
+#include "modules/Culture.h"
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -350,7 +351,7 @@ void Kernel::step() {
                 agent.B[0] += econ_pressure * mods.authority_delta;
                 agent.B[1] += econ_pressure * mods.tradition_delta;
                 agent.B[2] += econ_pressure * mods.hierarchy_delta;
-                agent.B[3] += econ_pressure * mods.religiosity_delta;
+                agent.B[3] += econ_pressure * mods.isolation_delta;
             }
             
             // Low welfare → reject tradition (demand change)
@@ -369,9 +370,30 @@ void Kernel::step() {
     health_.updateAgents(agents_, economy_, generation_);
     psychology_.updateAgents(agents_, economy_, generation_);
     
-    // Auto-detect movements every 100 ticks
-    if (generation_ % 100 == 0) {
-        auto clusters = culture_.detectCultures(agents_, 8, 50, 0.5);
+    // Auto-detect movements using DBSCAN (can be sampled for performance)
+    if (cfg_.detectMovements && cfg_.movementClusteringPeriod > 0 &&
+        generation_ % cfg_.movementClusteringPeriod == 0) {
+        DBSCANClustering detector(0.5, 50);
+        std::vector<Cluster> clusters;
+
+        const bool shouldSample = cfg_.movementClusteringSampleSize > 0 &&
+                                  agents_.size() > cfg_.movementClusteringSampleSize;
+        if (shouldSample) {
+            std::vector<std::uint32_t> indices(agents_.size());
+            std::iota(indices.begin(), indices.end(), 0);
+            std::shuffle(indices.begin(), indices.end(), rng_);
+            indices.resize(cfg_.movementClusteringSampleSize);
+
+            std::vector<Agent> sampledAgents;
+            sampledAgents.reserve(indices.size());
+            for (auto idx : indices) {
+                sampledAgents.push_back(agents_[idx]);
+            }
+            clusters = detector.runOnAgents(*this, sampledAgents);
+        } else {
+            clusters = detector.run(*this);
+        }
+
         movements_.update(*this, clusters, generation_);
     }
 }
@@ -1093,7 +1115,7 @@ void Kernel::initEconomicSystems() {
     // Market: Favor Liberty (-B0), Accept Hierarchy (+B2)
     econ_systems_["market"] = {
         "market",
-        { -0.3, 0.0, 0.2, 0.0 } // authority_delta, tradition_delta, hierarchy_delta, religiosity_delta
+        { -0.3, 0.0, 0.2, 0.0 } // authority_delta, tradition_delta, hierarchy_delta, isolation_delta
     };
 
     // Planned: Favor Authority (+B0), Demand Equality (-B2)

@@ -1,9 +1,7 @@
 # Core library CMakeLists.txt
 cmake_minimum_required(VERSION 3.15)
 
-# 1. Enable CUDA
-enable_language(CUDA)
-set(CMAKE_CUDA_STANDARD 17)
+# 1. CUDA configuration handled at the root CMakeLists
 
 # 2. Include .cu files
 file(GLOB_RECURSE CORE_SOURCES
@@ -29,7 +27,7 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 # 3. Link CUDA
-target_link_libraries(grandstrategy PRIVATE CUDA::cudart)
+target_link_libraries(grandstrategy PUBLIC CUDA::cudart CUDA::cudadevrt)
 target_compile_features(grandstrategy PUBLIC cxx_std_17)
 target_compile_definitions(grandstrategy PRIVATE USE_CUDA)
 set_property(TARGET grandstrategy PROPERTY CUDA_SEPARABLE_COMPILATION ON)

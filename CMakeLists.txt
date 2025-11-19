@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.15)
-project(GrandStrategySim VERSION 0.3.0 LANGUAGES CXX)
+project(GrandStrategySim VERSION 0.3.0 LANGUAGES CXX CUDA)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # For IDE integration
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+enable_language(CUDA)
+find_package(CUDAToolkit REQUIRED)
+include(EnsureCudaDeviceRuntime)
 
 # Options
 option(BUILD_TESTS "Build test suite" ON)

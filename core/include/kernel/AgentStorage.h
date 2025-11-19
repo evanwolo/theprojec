@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <algorithm>
+#include <cstdint>
 #include "kernel/AgentDataView.h"
 #include "kernel/Agent.h" 
 
@@ -10,6 +11,8 @@ private:
     std::vector<double> B0, B1, B2, B3;
     std::vector<double> susceptibility;
     std::vector<double> fluency;
+    std::vector<std::uint8_t> primaryLang;
+    std::vector<std::uint8_t> alive;
 
     // Network Data (CSR)
     std::vector<int> neighbor_offsets;
@@ -25,6 +28,8 @@ public:
         B3.resize(size);
         susceptibility.resize(size);
         fluency.resize(size);
+        primaryLang.resize(size);
+        alive.resize(size);
         
         neighbor_offsets.resize(size);
         neighbor_counts.resize(size);
@@ -36,7 +41,7 @@ public:
         return AgentDataView{
             static_cast<uint32_t>(B0.size()),
             B0.data(), B1.data(), B2.data(), B3.data(),
-            susceptibility.data(), fluency.data(),
+            susceptibility.data(), fluency.data(), primaryLang.data(), alive.data(),
             neighbor_offsets.data(), neighbor_counts.data(), neighbor_indices.data()
         };
     }
@@ -61,6 +66,8 @@ public:
             // Copy Properties
             susceptibility[i] = a.m_susceptibility;
             fluency[i] = a.fluency;
+            primaryLang[i] = a.primaryLang;
+            alive[i] = static_cast<std::uint8_t>(a.alive ? 1 : 0);
 
             // Flatten Network (Adjacency List -> CSR)
             neighbor_offsets[i] = static_cast<int>(neighbor_indices.size());

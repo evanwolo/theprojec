@@ -202,7 +202,11 @@ void DBSCANClustering::expandCluster(const std::vector<Agent>& agents,
 }
 
 std::vector<Cluster> DBSCANClustering::run(const Kernel& kernel) {
-    const auto& agents = kernel.agents();
+    return runOnAgents(kernel, kernel.agents());
+}
+
+std::vector<Cluster> DBSCANClustering::runOnAgents(const Kernel& kernel,
+                                                   const std::vector<Agent>& agents) {
     std::vector<int> labels(agents.size(), 0);
     int clusterId = 0;
     noisePoints_ = 0;

@@ -1,4 +1,5 @@
 #pragma once
+#include <cuda_runtime.h>
 #include "kernel/AgentStorage.h"
 #include "kernel/Kernel.h" // For KernelConfig
 
@@ -6,4 +7,4 @@
 void launchGpuBeliefUpdate(AgentStorage& hostStorage, const KernelConfig& cfg);
 
 // Utility to check for CUDA errors
-void checkCuda(const char* func, const char* file, int line);
+void checkCuda(const char* func, const char* file, int line, cudaError_t err);

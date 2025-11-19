@@ -3,14 +3,22 @@
 #include <iostream>
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 
-#define CUDA_CHECK(call) checkCuda((#call), __FILE__, __LINE__)
+#define CUDA_CHECK(call) do { \
+    cudaError_t err_ = (call); \
+    if (err_ != cudaSuccess) { \
+        checkCuda((#call), __FILE__, __LINE__, err_); \
+    } \
+} while (0)
 
 // --- The CUDA Kernel (Runs on thousands of GPU threads) ---
 __global__ void updateBeliefsKernel(AgentDataView view, double stepSize, double simFloor) {
     // 1. Identify which agent this thread is responsible for
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= view.count) return;
+    if (!view.alive[i]) return;
 
     // 2. Load My State (Coalesced Memory Access)
     double myB0 = view.B0[i];
@@ -19,6 +27,7 @@ __global__ void updateBeliefsKernel(AgentDataView view, double stepSize, double 
     double myB3 = view.B3[i];
     double mySusc = view.susceptibility[i];
     double myFluency = view.fluency[i];
+    std::uint8_t myLang = view.primaryLang[i];
 
     double myNormSq = myB0*myB0 + myB1*myB1 + myB2*myB2 + myB3*myB3;
 
@@ -37,6 +46,9 @@ __global__ void updateBeliefsKernel(AgentDataView view, double stepSize, double 
         double tB1 = view.B1[nbrId];
         double tB2 = view.B2[nbrId];
         double tB3 = view.B3[nbrId];
+        if (!view.alive[nbrId]) continue;
+        double nbrFluency = view.fluency[nbrId];
+        std::uint8_t nbrLang = view.primaryLang[nbrId];
         
         // --- Physics Logic (Identical to CPU version) ---
         double tNormSq = tB0*tB0 + tB1*tB1 + tB2*tB2 + tB3*tB3;
@@ -53,7 +65,8 @@ __global__ void updateBeliefsKernel(AgentDataView view, double stepSize, double 
         if (gate <= 0.0) continue; // Optimization: Skip calculation
 
         // Language Factor
-        double langQ = 0.5 * (myFluency + view.fluency[nbrId]);
+        double langQ = (myLang == nbrLang) ? 0.5 * (myFluency + nbrFluency) : 0.1;
+        if (langQ <= 0.0) continue;
         
         double weight = stepSize * gate * langQ * mySusc;
 
@@ -90,14 +103,17 @@ struct GpuContext {
     size_t edgeCapacity = 0;
     
     // Device Pointers (VRAM)
-    double *dB0, *dB1, *dB2, *dB3, *dSus, *dFlu;
-    int *dOff, *dCnt, *dIdx;
+    double *dB0 = nullptr, *dB1 = nullptr, *dB2 = nullptr, *dB3 = nullptr;
+    double *dSus = nullptr, *dFlu = nullptr;
+    std::uint8_t *dLang = nullptr, *dAlive = nullptr;
+    int *dOff = nullptr, *dCnt = nullptr, *dIdx = nullptr;
 
     // Allocate VRAM
     void resize(size_t nAgents, size_t nEdges) {
         if (initialized) {
              cudaFree(dB0); cudaFree(dB1); cudaFree(dB2); cudaFree(dB3);
              cudaFree(dSus); cudaFree(dFlu);
+             cudaFree(dLang); cudaFree(dAlive);
              cudaFree(dOff); cudaFree(dCnt); cudaFree(dIdx);
         }
         
@@ -108,6 +124,8 @@ struct GpuContext {
         CUDA_CHECK(cudaMalloc(&dB3, nAgents * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&dSus, nAgents * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&dFlu, nAgents * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&dLang, nAgents * sizeof(std::uint8_t)));
+        CUDA_CHECK(cudaMalloc(&dAlive, nAgents * sizeof(std::uint8_t)));
         
         // Allocate Network Arrays
         CUDA_CHECK(cudaMalloc(&dOff, nAgents * sizeof(int)));
@@ -139,6 +157,8 @@ void launchGpuBeliefUpdate(AgentStorage& hostStorage, const KernelConfig& cfg) {
     
     CUDA_CHECK(cudaMemcpy(g_ctx.dSus, hView.susceptibility, nAgents * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(g_ctx.dFlu, hView.fluency, nAgents * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(g_ctx.dLang, hView.primaryLang, nAgents * sizeof(std::uint8_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(g_ctx.dAlive, hView.alive, nAgents * sizeof(std::uint8_t), cudaMemcpyHostToDevice));
 
     CUDA_CHECK(cudaMemcpy(g_ctx.dOff, hView.neighbor_offsets, nAgents * sizeof(int), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(g_ctx.dCnt, hView.neighbor_counts, nAgents * sizeof(int), cudaMemcpyHostToDevice));
@@ -148,6 +168,7 @@ void launchGpuBeliefUpdate(AgentStorage& hostStorage, const KernelConfig& cfg) {
     AgentDataView dView = hView; // Copy counts
     dView.B0 = g_ctx.dB0; dView.B1 = g_ctx.dB1; dView.B2 = g_ctx.dB2; dView.B3 = g_ctx.dB3;
     dView.susceptibility = g_ctx.dSus; dView.fluency = g_ctx.dFlu;
+    dView.primaryLang = g_ctx.dLang; dView.alive = g_ctx.dAlive;
     dView.neighbor_offsets = g_ctx.dOff; dView.neighbor_counts = g_ctx.dCnt;
     dView.neighbor_indices = g_ctx.dIdx;
 
@@ -167,11 +188,8 @@ void launchGpuBeliefUpdate(AgentStorage& hostStorage, const KernelConfig& cfg) {
     CUDA_CHECK(cudaMemcpy(hView.B3, g_ctx.dB3, nAgents * sizeof(double), cudaMemcpyDeviceToHost));
 }
 
-void checkCuda(const char* func, const char* file, int line) {
-    cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        std::cerr << "CUDA Error at " << file << ":" << line << " (" << func << "): " 
-                  << cudaGetErrorString(err) << std::endl;
-        exit(1);
-    }
+void checkCuda(const char* func, const char* file, int line, cudaError_t err) {
+    std::cerr << "CUDA Error at " << file << ":" << line << " (" << func << "): " 
+              << cudaGetErrorString(err) << std::endl;
+    std::exit(EXIT_FAILURE);
 }

@@ -54,6 +54,7 @@ public:
     DBSCANClustering(double eps = 0.3, int minPts = 50);
 
     std::vector<Cluster> run(const Kernel& kernel);
+    std::vector<Cluster> runOnAgents(const Kernel& kernel, const std::vector<Agent>& agents);
     int noisePoints() const { return noisePoints_; }
 
 private:

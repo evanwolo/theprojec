@@ -1,11 +1,13 @@
 # CLI CMakeLists.txt
 cmake_minimum_required(VERSION 3.15)
+find_package(CUDAToolkit REQUIRED)
 
 # Main kernel CLI
 add_executable(KernelSim main_kernel.cpp)
 
-# Link against core library
-target_link_libraries(KernelSim PRIVATE grandstrategy)
+# Link against core library and CUDA runtime for device registration
+target_link_libraries(KernelSim PRIVATE grandstrategy CUDA::cudart CUDA::cudadevrt)
+set_target_properties(KernelSim PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # Include core headers
 target_include_directories(KernelSim PRIVATE ${CMAKE_SOURCE_DIR}/core/include)

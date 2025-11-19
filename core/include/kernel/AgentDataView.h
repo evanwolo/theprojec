@@ -21,6 +21,8 @@ struct AgentDataView {
     // --- Physics Properties ---
     double* __restrict__ susceptibility; // Modulated by Economy/Psych
     double* __restrict__ fluency;        // Language fluency
+    std::uint8_t* __restrict__ primaryLang; // Dominant language per agent
+    std::uint8_t* __restrict__ alive;       // Alive flag (1=alive)
 
     // --- Social Network (CSR Format) ---
     // We replace std::vector<std::vector<int>> with Compressed Sparse Row.
