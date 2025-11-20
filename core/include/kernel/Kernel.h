@@ -163,6 +163,7 @@ private:
 
     // The new high-performance storage
     AgentStorage gpu_storage_; 
+    bool graphDirty_ = true;
     
     // The new optimized update function
     void updateBeliefsSoA(); 

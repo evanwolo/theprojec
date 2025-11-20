@@ -34,6 +34,7 @@ void Kernel::reset(const KernelConfig& cfg) {
     cfg_ = cfg;
     generation_ = 0;
     rng_.seed(cfg.seed);
+    graphDirty_ = true;
     psychology_.configure(cfg_.regions, cfg_.seed ^ 0x9E3779B97F4A7C15ULL);
     health_.configure(cfg_.regions, cfg_.seed ^ 0xBF58476D1CE4E5B9ULL);
     initAgents();
@@ -183,6 +184,8 @@ void Kernel::buildSmallWorld() {
         }
         agent.neighbors = std::move(cleaned);
     }
+
+    graphDirty_ = true;
 }
 
 void Kernel::updateBeliefs() {
@@ -253,7 +256,8 @@ void Kernel::updateBeliefs() {
 void Kernel::step() {
     // 1. Sync Legacy -> SoA (Prepare for Physics)
     // This copies the current state of agents into the contiguous arrays
-    gpu_storage_.syncFromLegacy(agents_);
+    gpu_storage_.syncFromLegacy(agents_, graphDirty_);
+    graphDirty_ = false;
 
     // 2. Run Physics (Dispatch based on compile-time or run-time flag)
     // For now, we assume if CUDA is compiled in, we use it.
@@ -783,6 +787,8 @@ void Kernel::createChild(std::uint32_t motherId) {
     
     // Log birth event
     event_log_.logBirth(generation_, child.id, child.region, motherId);
+
+    graphDirty_ = true;
 }
 
 void Kernel::compactDeadAgents() {
@@ -797,9 +803,11 @@ void Kernel::compactDeadAgents() {
         );
     }
     
+    bool removedEdges = false;
     // Remove dead agents from neighbor lists
     for (auto& agent : agents_) {
         if (!agent.alive) continue;
+        auto before = agent.neighbors.size();
         agent.neighbors.erase(
             std::remove_if(agent.neighbors.begin(), agent.neighbors.end(),
                 [this](std::uint32_t id) {
@@ -807,6 +815,13 @@ void Kernel::compactDeadAgents() {
                 }),
             agent.neighbors.end()
         );
+        if (agent.neighbors.size() != before) {
+            removedEdges = true;
+        }
+    }
+
+    if (removedEdges) {
+        graphDirty_ = true;
     }
 }
 
@@ -854,6 +869,7 @@ void Kernel::stepMigration() {
     std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
     std::uniform_int_distribution<std::uint32_t> region_dist(0, cfg_.regions - 1);
     
+    bool anyMigrated = false;
     for (auto agent_id : migration_candidates) {
         auto& agent = agents_[agent_id];
         std::uint32_t origin = agent.region;
@@ -902,8 +918,14 @@ void Kernel::stepMigration() {
                     std::shuffle(agent.neighbors.begin(), agent.neighbors.end(), rng_);
                     agent.neighbors.resize(keep_count);
                 }
+
+                anyMigrated = true;
             }
         }
+    }
+
+    if (anyMigrated) {
+        graphDirty_ = true;
     }
 }
 

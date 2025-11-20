@@ -13,14 +13,14 @@ struct AgentDataView {
 
     // --- Beliefs (Structure of Arrays) ---
     // Splitting 4D beliefs into 4 arrays allows vector loading
-    double* __restrict__ B0; // Authority-Liberty
-    double* __restrict__ B1; // Tradition-Progress
-    double* __restrict__ B2; // Hierarchy-Equality
-    double* __restrict__ B3; // Isolation-Unity
+    float* __restrict__ B0; // Authority-Liberty
+    float* __restrict__ B1; // Tradition-Progress
+    float* __restrict__ B2; // Hierarchy-Equality
+    float* __restrict__ B3; // Isolation-Unity
 
     // --- Physics Properties ---
-    double* __restrict__ susceptibility; // Modulated by Economy/Psych
-    double* __restrict__ fluency;        // Language fluency
+    float* __restrict__ susceptibility; // Modulated by Economy/Psych
+    float* __restrict__ fluency;        // Language fluency
     std::uint8_t* __restrict__ primaryLang; // Dominant language per agent
     std::uint8_t* __restrict__ alive;       // Alive flag (1=alive)
 
