@@ -1,4 +1,5 @@
 #include "kernel/Kernel.h"
+#include "modules/Culture.h"
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -34,11 +35,17 @@ void Kernel::reset(const KernelConfig& cfg) {
     rng_.seed(cfg.seed);
     psychology_.configure(cfg_.regions, cfg_.seed ^ 0x9E3779B97F4A7C15ULL);
     health_.configure(cfg_.regions, cfg_.seed ^ 0xBF58476D1CE4E5B9ULL);
+    mean_field_.configure(cfg_.regions);
+    
+    // Initialize economy FIRST so we have region coordinates
+    economy_.init(cfg_.regions, cfg_.population, rng_, cfg_.startCondition);
+    
     initAgents();
     buildSmallWorld();
     
-    // Initialize economy with regions and agents
-    economy_.init(cfg_.regions, cfg_.population, rng_, cfg_.startCondition);
+    // Assign languages based on region coordinates (after economy init)
+    assignLanguagesByGeography();
+    
     psychology_.initializeAgents(agents_);
     health_.initializeAgents(agents_);
 }
@@ -52,7 +59,6 @@ void Kernel::initAgents() {
     std::normal_distribution<double> traitDist(0.5, 0.15);
     std::uniform_real_distribution<double> uniDist(0.0, 1.0);
     std::uniform_int_distribution<std::uint32_t> regionDist(0, cfg_.regions - 1);
-    std::uniform_int_distribution<std::uint8_t> langDist(0, 3);  // 4 base languages
     
     // Realistic age distribution - approximates demographic pyramid
     // Age brackets: [0-15), [15-30), [30-50), [50-70), [70-90]
@@ -74,20 +80,21 @@ void Kernel::initAgents() {
         a.age = static_cast<int>(ageDist(rng_));
         a.female = sexDist(rng_);
         
-        a.primaryLang = langDist(rng_);
+        // Language will be assigned after economy init (in assignLanguagesByGeography)
+        a.primaryLang = 0;
+        a.dialect = 0;
         a.fluency = 0.7 + 0.3 * (uniDist(rng_) - 0.5);
         
-        // Personality traits
+        // Personality traits - all drawn from same distribution
+        // Leadership emerges from network position + traits, not predetermined
         a.openness = std::clamp(traitDist(rng_), 0.0, 1.0);
         a.conformity = std::clamp(traitDist(rng_), 0.0, 1.0);
         a.assertiveness = std::clamp(traitDist(rng_), 0.0, 1.0);
         a.sociality = std::clamp(traitDist(rng_), 0.0, 1.0);
         
-        // Every 100th agent is a potential charismatic leader
-        if (i % 100 == 0) {
-            std::uniform_real_distribution<double> charismaticDist(0.8, 0.95);
-            a.assertiveness = charismaticDist(rng_);
-        }
+        // NOTE: Removed hardcoded "every 100th agent is a leader" logic
+        // High-assertiveness individuals will naturally emerge from the trait distribution
+        // (traitDist has mean 0.5, std 0.15, so ~2.5% will have assertiveness > 0.8 naturally)
         
         // Initial beliefs
         for (int k = 0; k < 4; ++k) {
@@ -182,64 +189,203 @@ void Kernel::buildSmallWorld() {
     }
 }
 
-void Kernel::updateBeliefs() {
-    // Compute deltas in parallel-friendly way
-    std::vector<std::array<double, 4>> dx(agents_.size());
+void Kernel::assignLanguagesByGeography() {
+    // EMERGENT LANGUAGE ZONES: Fuzzy boundaries with gradients and minority pockets
+    // Language families have "cores" but influence fades with distance
+    // Border regions have mixed languages; isolated areas may develop differently
     
-    const std::size_t n = agents_.size();
-    const double stepSize = cfg_.stepSize;
+    std::uniform_real_distribution<double> uniDist(0.0, 1.0);
+    std::uniform_int_distribution<std::uint8_t> langDist(0, 3);
+    std::normal_distribution<double> noiseDist(0.0, 0.15);  // boundary noise
     
-    #pragma omp parallel for schedule(dynamic)
-    for (std::size_t i = 0; i < n; ++i) {
-        const auto& ai = agents_[i];
-        if (!ai.alive) continue;  // Skip dead agents
+    // Language family centers (not hard quadrant boundaries)
+    // Centers can shift slightly each simulation for variety
+    double western_cx = 0.25 + noiseDist(rng_) * 0.1;
+    double western_cy = 0.75 + noiseDist(rng_) * 0.1;
+    double eastern_cx = 0.75 + noiseDist(rng_) * 0.1;
+    double eastern_cy = 0.75 + noiseDist(rng_) * 0.1;
+    double northern_cx = 0.25 + noiseDist(rng_) * 0.1;
+    double northern_cy = 0.25 + noiseDist(rng_) * 0.1;
+    double southern_cx = 0.75 + noiseDist(rng_) * 0.1;
+    double southern_cy = 0.25 + noiseDist(rng_) * 0.1;
+    
+    // Compute language for each region based on distance to language centers
+    std::vector<std::uint8_t> regionLang(cfg_.regions);
+    std::vector<std::uint8_t> regionDialect(cfg_.regions);
+    std::vector<double> regionLangStrength(cfg_.regions);  // how "strongly" region speaks its language
+    
+    for (std::uint32_t r = 0; r < cfg_.regions; ++r) {
+        const auto& region = economy_.getRegion(r);
+        double x = region.x;
+        double y = region.y;
         
-        std::array<double, 4> acc{0, 0, 0, 0};
+        // Distance to each language center (with noise for natural boundaries)
+        double noise_x = noiseDist(rng_) * 0.1;
+        double noise_y = noiseDist(rng_) * 0.1;
+        double px = x + noise_x;
+        double py = y + noise_y;
         
-        // Cache agent properties used in inner loop
-        const double ai_susceptibility = ai.m_susceptibility;
-        const double ai_comm = ai.m_comm;
+        double dist_western = std::sqrt((px - western_cx) * (px - western_cx) + (py - western_cy) * (py - western_cy));
+        double dist_eastern = std::sqrt((px - eastern_cx) * (px - eastern_cx) + (py - eastern_cy) * (py - eastern_cy));
+        double dist_northern = std::sqrt((px - northern_cx) * (px - northern_cx) + (py - northern_cy) * (py - northern_cy));
+        double dist_southern = std::sqrt((px - southern_cx) * (px - southern_cx) + (py - southern_cy) * (py - southern_cy));
         
-        for (auto jid : ai.neighbors) {
-            if (jid >= agents_.size()) continue;  // Safety check
-            const auto& aj = agents_[jid];
-            if (!aj.alive) continue;  // Skip dead neighbors
-            
-            double s = similarityGate(ai, aj);
-            double lq = languageQuality(ai, aj);
-            double comm = 0.5 * (ai_comm + aj.m_comm);
-            double weight = stepSize * s * lq * comm * ai_susceptibility;
-            
-            // Unroll belief dimension loop for better performance
-            acc[0] += weight * fastTanh(aj.B[0] - ai.B[0]);
-            acc[1] += weight * fastTanh(aj.B[1] - ai.B[1]);
-            acc[2] += weight * fastTanh(aj.B[2] - ai.B[2]);
-            acc[3] += weight * fastTanh(aj.B[3] - ai.B[3]);
-        }
+        // Find minimum distance (dominant language)
+        std::uint8_t lang = 0;
+        double min_dist = dist_western;
+        if (dist_eastern < min_dist) { min_dist = dist_eastern; lang = 1; }
+        if (dist_northern < min_dist) { min_dist = dist_northern; lang = 2; }
+        if (dist_southern < min_dist) { min_dist = dist_southern; lang = 3; }
         
-        dx[i] = acc;
+        regionLang[r] = lang;
+        
+        // Language strength: closer to center = stronger identity
+        // Regions far from any center are more linguistically mixed
+        regionLangStrength[r] = std::max(0.3, 1.0 - min_dist * 1.5);
+        
+        // Dialect based on exact position (continuous variation)
+        double dialectPos = (x + y * 1.3 + region.endowments[0] * 0.2) / 2.5;  // geography + resources affect dialect
+        regionDialect[r] = static_cast<std::uint8_t>(std::min(9.0, std::max(0.0, dialectPos * 10.0)));
     }
     
-    // Apply updates
-    #pragma omp parallel for
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!agents_[i].alive) continue;  // Skip dead agents
+    // Assign languages to agents based on their region
+    for (auto& agent : agents_) {
+        if (!agent.alive) continue;
         
-        agents_[i].x[0] += dx[i][0];
-        agents_[i].x[1] += dx[i][1];
-        agents_[i].x[2] += dx[i][2];
-        agents_[i].x[3] += dx[i][3];
+        std::uint8_t baseLang = regionLang[agent.region];
+        std::uint8_t baseDialect = regionDialect[agent.region];
+        double langStrength = regionLangStrength[agent.region];
         
-        agents_[i].B[0] = fastTanh(agents_[i].x[0]);
-        agents_[i].B[1] = fastTanh(agents_[i].x[1]);
-        agents_[i].B[2] = fastTanh(agents_[i].x[2]);
-        agents_[i].B[3] = fastTanh(agents_[i].x[3]);
+        // EMERGENT LANGUAGE ASSIGNMENT: Minority language probability varies by region strength
+        // Border regions (low strength) have more language diversity
+        double minority_chance = (1.0 - langStrength) * 0.3;  // 0-21% chance based on distance from core
+        
+        // Agent's mobility and openness increase chance of speaking non-regional language
+        minority_chance += agent.m_mobility * 0.05 + agent.openness * 0.05;
+        minority_chance = std::min(0.4, minority_chance);  // cap at 40%
+        
+        if (uniDist(rng_) < minority_chance) {
+            // More likely to speak neighboring language than distant one
+            // Weight by inverse distance to other language centers
+            agent.primaryLang = langDist(rng_);  // simplified: random for now
+            agent.dialect = static_cast<std::uint8_t>(uniDist(rng_) * 10);
+        } else {
+            agent.primaryLang = baseLang;
+            // Dialect variation: stronger language regions have less variation
+            int maxVariation = static_cast<int>(3 * (1.0 - langStrength * 0.5));  // 1-3
+            int dialectVariation = static_cast<int>(uniDist(rng_) * (maxVariation * 2 + 1)) - maxVariation;
+            agent.dialect = static_cast<std::uint8_t>(std::clamp(
+                static_cast<int>(baseDialect) + dialectVariation, 0, 9));
+        }
+    }
+}
 
-        // Update cached norm
-        agents_[i].B_norm_sq = agents_[i].B[0] * agents_[i].B[0] +
-                                agents_[i].B[1] * agents_[i].B[1] +
-                                agents_[i].B[2] * agents_[i].B[2] +
-                                agents_[i].B[3] * agents_[i].B[3];
+void Kernel::updateBeliefs() {
+    if (cfg_.useMeanField) {
+        // **MEAN FIELD APPROXIMATION**: O(N) complexity, decoupled from network density
+        // Compute regional fields once
+        mean_field_.computeFields(agents_, regionIndex_);
+        
+        // Update each agent based on regional field
+        const std::size_t n = agents_.size();
+        const double stepSize = cfg_.stepSize;
+        
+        #pragma omp parallel for schedule(dynamic)
+        for (std::size_t i = 0; i < n; ++i) {
+            auto& agent = agents_[i];
+            if (!agent.alive) continue;
+            
+            // Get regional field
+            const auto& field = mean_field_.getRegionalField(agent.region);
+            double field_strength = mean_field_.getFieldStrength(agent.region);
+            
+            // Compute influence from field
+            double weight = stepSize * field_strength * agent.m_comm * agent.m_susceptibility;
+            
+            // Update beliefs toward field
+            std::array<double, 4> dx;
+            dx[0] = weight * fastTanh(field[0] - agent.B[0]);
+            dx[1] = weight * fastTanh(field[1] - agent.B[1]);
+            dx[2] = weight * fastTanh(field[2] - agent.B[2]);
+            dx[3] = weight * fastTanh(field[3] - agent.B[3]);
+            
+            // Apply updates
+            agent.x[0] += dx[0];
+            agent.x[1] += dx[1];
+            agent.x[2] += dx[2];
+            agent.x[3] += dx[3];
+            
+            agent.B[0] = fastTanh(agent.x[0]);
+            agent.B[1] = fastTanh(agent.x[1]);
+            agent.B[2] = fastTanh(agent.x[2]);
+            agent.B[3] = fastTanh(agent.x[3]);
+
+            // Update cached norm
+            agent.B_norm_sq = agent.B[0] * agent.B[0] +
+                             agent.B[1] * agent.B[1] +
+                             agent.B[2] * agent.B[2] +
+                             agent.B[3] * agent.B[3];
+        }
+    } else {
+        // **ORIGINAL PAIRWISE UPDATES**: O(N·k) complexity
+        // Compute deltas in parallel-friendly way
+        std::vector<std::array<double, 4>> dx(agents_.size());
+        
+        const std::size_t n = agents_.size();
+        const double stepSize = cfg_.stepSize;
+        
+        #pragma omp parallel for schedule(dynamic)
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& ai = agents_[i];
+            if (!ai.alive) continue;  // Skip dead agents
+            
+            std::array<double, 4> acc{0, 0, 0, 0};
+            
+            // Cache agent properties used in inner loop
+            const double ai_susceptibility = ai.m_susceptibility;
+            const double ai_comm = ai.m_comm;
+            
+            for (auto jid : ai.neighbors) {
+                if (jid >= agents_.size()) continue;  // Safety check
+                const auto& aj = agents_[jid];
+                if (!aj.alive) continue;  // Skip dead neighbors
+                
+                double s = similarityGate(ai, aj);
+                double lq = languageQuality(ai, aj);
+                double comm = 0.5 * (ai_comm + aj.m_comm);
+                double weight = stepSize * s * lq * comm * ai_susceptibility;
+                
+                // Unroll belief dimension loop for better performance
+                acc[0] += weight * fastTanh(aj.B[0] - ai.B[0]);
+                acc[1] += weight * fastTanh(aj.B[1] - ai.B[1]);
+                acc[2] += weight * fastTanh(aj.B[2] - ai.B[2]);
+                acc[3] += weight * fastTanh(aj.B[3] - ai.B[3]);
+            }
+            
+            dx[i] = acc;
+        }
+        
+        // Apply updates
+        #pragma omp parallel for
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!agents_[i].alive) continue;  // Skip dead agents
+            
+            agents_[i].x[0] += dx[i][0];
+            agents_[i].x[1] += dx[i][1];
+            agents_[i].x[2] += dx[i][2];
+            agents_[i].x[3] += dx[i][3];
+            
+            agents_[i].B[0] = fastTanh(agents_[i].x[0]);
+            agents_[i].B[1] = fastTanh(agents_[i].x[1]);
+            agents_[i].B[2] = fastTanh(agents_[i].x[2]);
+            agents_[i].B[3] = fastTanh(agents_[i].x[3]);
+
+            // Update cached norm
+            agents_[i].B_norm_sq = agents_[i].B[0] * agents_[i].B[0] +
+                                   agents_[i].B[1] * agents_[i].B[1] +
+                                   agents_[i].B[2] * agents_[i].B[2] +
+                                   agents_[i].B[3] * agents_[i].B[3];
+        }
     }
 }
 
@@ -302,49 +448,51 @@ void Kernel::step() {
             agent.m_susceptibility *= (1.0 + regional_econ.hardship);
             agent.m_susceptibility = std::clamp(agent.m_susceptibility, 0.4, 2.0);
             
-            // Economic conditions shape political thought
-            double econ_pressure = 0.001;  // gentle pressure each tick
+            // EMERGENT BELIEF EVOLUTION: Economic experience MAY influence beliefs
+            // but the direction depends on personality, not predetermined mappings
             
-            // High personal hardship → reject authority, demand equality
-            if (agent_econ.hardship > 0.5) {
-                agent.B[0] -= econ_pressure * agent_econ.hardship;  // Authority → Liberty
-                agent.B[2] -= econ_pressure * agent_econ.hardship;  // Hierarchy → Equality
+            // Base pressure is very small - beliefs change slowly
+            double base_pressure = 0.0005;
+            
+            // Openness determines how much economic experience affects beliefs
+            double experience_weight = agent.openness * base_pressure;
+            
+            // Personal hardship creates pressure for SOME change, direction varies by personality
+            if (agent_econ.hardship > 0.3) {
+                double hardship_pressure = experience_weight * agent_econ.hardship;
+                
+                // High conformity → blame self/accept system, low conformity → blame system
+                if (agent.conformity < 0.4) {
+                    // Non-conformist: hardship → question authority/hierarchy
+                    agent.B[0] -= hardship_pressure * (0.5 - agent.conformity);
+                    agent.B[2] -= hardship_pressure * (0.5 - agent.conformity);
+                } else if (agent.conformity > 0.6) {
+                    // Conformist: hardship → support stronger authority for stability
+                    agent.B[0] += hardship_pressure * (agent.conformity - 0.5);
+                }
+                // Middle conformity: no systematic shift
             }
             
-            // High inequality in region → push toward equality
-            if (regional_econ.inequality > 0.4) {
-                agent.B[2] -= econ_pressure * regional_econ.inequality;  // Hierarchy → Equality
+            // Wealth influences beliefs ONLY through lived experience, modulated by traits
+            double relative_wealth = agent_econ.wealth / std::max(0.5, regional_econ.welfare);
+            if (relative_wealth > 2.0 && agent.openness < 0.5) {
+                // Wealthy + low openness → rationalize current system (slight hierarchy support)
+                agent.B[2] += experience_weight * 0.3;
+            } else if (relative_wealth < 0.5 && agent.assertiveness > 0.6) {
+                // Poor + assertive → demand change (slight equality push)
+                agent.B[2] -= experience_weight * 0.3;
+            }
+            // NOTE: Most agents (moderate traits) have no systematic wealth→belief pressure
+            
+            // Regional conditions create shared experiences, but response varies
+            if (regional_econ.welfare < 0.5 && agent.openness > 0.6) {
+                // Low welfare + high openness → open to change (progress over tradition)
+                agent.B[1] -= experience_weight * (0.5 - regional_econ.welfare);
             }
             
-            // Personal wealth → support hierarchy and authority
-            if (agent_econ.wealth > 2.0) {
-                agent.B[0] += econ_pressure * 0.5;  // Liberty → Authority
-                agent.B[2] += econ_pressure * 0.5;  // Equality → Hierarchy
-            }
-            
-            // Economic system shapes ideology
-            if (regional_econ.economic_system == "market") {
-                // Market economy → favor liberty, accept hierarchy
-                agent.B[0] -= econ_pressure * 0.3;  // → Liberty
-                agent.B[2] += econ_pressure * 0.2;  // → Hierarchy
-            } else if (regional_econ.economic_system == "planned") {
-                // Planned economy → favor authority, demand equality
-                agent.B[0] += econ_pressure * 0.3;  // → Authority
-                agent.B[2] -= econ_pressure * 0.3;  // → Equality
-            } else if (regional_econ.economic_system == "feudal") {
-                // Feudal system → tradition and hierarchy dominate
-                agent.B[1] += econ_pressure * 0.4;  // → Tradition
-                agent.B[2] += econ_pressure * 0.4;  // → Hierarchy
-            } else if (regional_econ.economic_system == "cooperative") {
-                // Cooperative → equality and local autonomy
-                agent.B[2] -= econ_pressure * 0.3;  // → Equality
-                agent.B[0] -= econ_pressure * 0.2;  // → Liberty
-            }
-            
-            // Low welfare → reject tradition (demand change)
-            if (regional_econ.welfare < 0.5) {
-                agent.B[1] -= econ_pressure * (0.5 - regional_econ.welfare);  // Tradition → Progress
-            }
+            // NO SYSTEM-BASED BELIEF FORCING
+            // Economic systems don't automatically push beliefs in predetermined directions
+            // Beliefs shaped by actual experiences, social influence, and personality
             
             // Keep beliefs in [-1, 1] range
             for (int d = 0; d < 4; ++d) {
@@ -356,12 +504,6 @@ void Kernel::step() {
     // Update health and psychology every tick using latest economic signals
     health_.updateAgents(agents_, economy_, generation_);
     psychology_.updateAgents(agents_, economy_, generation_);
-    
-    // Auto-detect movements every 100 ticks
-    if (generation_ % 100 == 0) {
-        auto clusters = culture_.detectCultures(agents_, 8, 50, 0.5);
-        movements_.update(*this, clusters, generation_);
-    }
 }
 
 void Kernel::stepN(int n) {
@@ -684,8 +826,20 @@ void Kernel::createChild(std::uint32_t motherId) {
     // Region: same as mother
     child.region = mother.region;
     
-    // Language: inherit from mother
+    // Language: inherit from mother, dialect may drift toward regional norm
     child.primaryLang = mother.primaryLang;
+    // Dialect: 80% inherit mother's, 20% drift toward region's dialect
+    const auto& region = economy_.getRegion(mother.region);
+    // Compute region's base dialect from coordinates
+    double x = region.x;
+    double y = region.y;
+    std::uint8_t lang = mother.primaryLang;
+    double qx = (lang == 0 || lang == 2) ? x : (1.0 - x);
+    double qy = (lang == 0 || lang == 1) ? (1.0 - y) : y;
+    double dialectPos = (qx + qy) / 2.0;
+    std::uint8_t regionDialect = static_cast<std::uint8_t>(std::min(9.0, dialectPos * 20.0));
+    std::bernoulli_distribution dialectDrift(0.2);
+    child.dialect = dialectDrift(rng_) ? regionDialect : mother.dialect;
     child.fluency = 0.5;  // will grow with age/exposure
     
     // Traits: genetic inheritance with mutation
@@ -807,11 +961,26 @@ void Kernel::stepMigration() {
         region_attractiveness[r] = welfare_pull + hardship_push + development_pull + crowding;
     }
     
-    // Migration candidates: young adults (age 18-35) with high mobility
+    // EMERGENT MIGRATION CANDIDATES: Anyone can migrate, but propensity varies by circumstance
+    // Age, family status, skills, and economic situation all affect likelihood
     std::vector<std::uint32_t> migration_candidates;
     for (std::size_t i = 0; i < agents_.size(); ++i) {
         const auto& agent = agents_[i];
-        if (agent.alive && agent.age >= 18 && agent.age <= 35 && agent.m_mobility > 0.7) {
+        if (!agent.alive) continue;
+        
+        // Base mobility affected by age (young and old migrate less frequently, but CAN migrate)
+        double age_mobility = 1.0;
+        if (agent.age < 18) age_mobility = 0.1 + agent.age * 0.05; // children rarely migrate alone
+        else if (agent.age > 60) age_mobility = std::max(0.1, 1.0 - (agent.age - 60) * 0.02); // elderly migrate less
+        
+        // Network ties reduce mobility (people with many connections are "rooted")
+        double network_mobility = 1.0 - std::min(0.5, agent.neighbors.size() * 0.02);
+        
+        // Effective mobility combines traits with situational factors
+        double effective_mobility = agent.m_mobility * age_mobility * network_mobility;
+        
+        // Everyone with any mobility can be a candidate (threshold varies)
+        if (effective_mobility > 0.3) {
             migration_candidates.push_back(i);
         }
     }
@@ -848,8 +1017,13 @@ void Kernel::stepMigration() {
                 }
             }
             
-            // Migrate if destination is significantly better
-            if (destination != origin && best_gain > 0.3) {
+            // EMERGENT MIGRATION THRESHOLD: Decision varies by personality and circumstances
+            // Risk-tolerant agents migrate for smaller gains; risk-averse need bigger incentive
+            double personal_threshold = 0.1 + (1.0 - agent.openness) * 0.3 + agent.conformity * 0.2;
+            // Desperate agents (high hardship) lower their threshold
+            personal_threshold *= (1.0 - origin_econ.hardship * 0.5);
+            
+            if (destination != origin && best_gain > personal_threshold) {
                 // Remove from old region
                 auto& old_region_index = regionIndex_[origin];
                 old_region_index.erase(
@@ -861,10 +1035,22 @@ void Kernel::stepMigration() {
                 agent.region = destination;
                 regionIndex_[destination].push_back(agent_id);
                 
-                // Migrants lose some network connections (cultural disruption)
-                if (agent.neighbors.size() > 3) {
-                    // Keep only 30% of connections
-                    std::size_t keep_count = agent.neighbors.size() * 3 / 10;
+                // EMERGENT NETWORK RETENTION: Social skill and tie strength determine what survives
+                if (agent.neighbors.size() > 2) {
+                    // Sociable agents maintain more connections across distance
+                    double retention_rate = 0.2 + agent.sociality * 0.4; // 20%-60% based on sociality
+                    
+                    // Long-distance moves lose more connections
+                    double distance_factor = std::abs(static_cast<int>(destination) - static_cast<int>(origin)) 
+                                            / static_cast<double>(cfg_.regions);
+                    retention_rate *= (1.0 - distance_factor * 0.3);
+                    
+                    // Conformist agents try harder to maintain existing ties
+                    retention_rate += agent.conformity * 0.1;
+                    
+                    retention_rate = std::clamp(retention_rate, 0.1, 0.8);
+                    std::size_t keep_count = static_cast<std::size_t>(agent.neighbors.size() * retention_rate);
+                    if (keep_count < 1) keep_count = 1;
                     std::shuffle(agent.neighbors.begin(), agent.neighbors.end(), rng_);
                     agent.neighbors.resize(keep_count);
                 }

@@ -10,6 +10,32 @@
 namespace {
 constexpr double kStressShockFloor = 0.05;
 constexpr double kStressShockCeil = 1.5;
+
+// EMERGENT STRESS SENSITIVITY: Personality determines how different stressors affect individuals
+struct StressSensitivity {
+    double economic;      // sensitivity to economic hardship
+    double media;         // sensitivity to negative information
+    double institutional; // sensitivity to institutional failures
+    double disease;       // sensitivity to health threats
+};
+
+StressSensitivity computeStressSensitivity(const Agent& agent) {
+    StressSensitivity sens;
+    
+    // Economic sensitivity: high for materialistic (low openness), low for adaptable (high openness)
+    sens.economic = 0.4 + 0.4 * (1.0 - agent.openness) + 0.2 * agent.conformity;
+    
+    // Media sensitivity: conformists are more affected by media narratives
+    sens.media = 0.2 + 0.5 * agent.conformity - 0.2 * agent.assertiveness;
+    
+    // Institutional sensitivity: non-conformists frustrated by rigid institutions
+    sens.institutional = 0.3 + 0.4 * (1.0 - agent.conformity) + 0.2 * agent.assertiveness;
+    
+    // Disease sensitivity: varies with sociality (social people more anxious about disease spread)
+    sens.disease = 0.2 + 0.3 * agent.sociality + 0.2 * (1.0 - agent.openness);
+    
+    return sens;
+}
 }
 
 void PsychologyModule::configure(std::uint32_t regionCount, std::uint64_t seed) {
@@ -62,10 +88,13 @@ void PsychologyModule::updateAgents(std::vector<Agent>& agents, const Economy& e
         const auto& econRegion = regional_profiles_[agent.region];
         const auto& agentEcon = econAgents[agent.id];
 
-        const double economicShock = 0.6 * agentEcon.hardship + 0.4 * econRegion.hardship;
-        const double mediaShock = 0.4 * econRegion.media_negativity;
-        const double institutionalShock = 0.5 * (1.0 - econRegion.institutional_support);
-        const double diseaseShock = 0.3 * agent.health.infected;
+        // EMERGENT STRESS: Sensitivity varies by personality
+        StressSensitivity sens = computeStressSensitivity(agent);
+        
+        const double economicShock = sens.economic * (0.6 * agentEcon.hardship + 0.4 * econRegion.hardship);
+        const double mediaShock = sens.media * econRegion.media_negativity;
+        const double institutionalShock = sens.institutional * (1.0 - econRegion.institutional_support);
+        const double diseaseShock = sens.disease * agent.health.infected;
 
         psych.stressors[toIndex(StressSource::EconomicHardship)] = economicShock;
         psych.stressors[toIndex(StressSource::MediaNegativity)] = mediaShock;

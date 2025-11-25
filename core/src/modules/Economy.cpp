@@ -1,4 +1,5 @@
 #include "modules/Economy.h"
+#include "modules/TradeNetwork.h"
 #include "kernel/Kernel.h"  // For Agent definition
 #include <algorithm>
 #include <numeric>
@@ -6,6 +7,7 @@
 #include <random>
 #include <cctype>
 #include <iostream>
+#include <memory>
 
 // Thread-local RNG for parallel operations (prevents race conditions)
 namespace {
@@ -16,12 +18,48 @@ namespace {
     }
 }
 
-// Subsistence requirements per capita (basic needs) - reduced for early game bootstrap
-constexpr double FOOD_SUBSISTENCE = 0.7;      // Was 1.0, reduced for bootstrap
-constexpr double ENERGY_SUBSISTENCE = 0.35;   // Was 0.5, reduced for bootstrap  
-constexpr double TOOLS_SUBSISTENCE = 0.2;     // Was 0.3, reduced for bootstrap
-constexpr double LUXURY_SUBSISTENCE = 0.0;    // non-essential
-constexpr double SERVICES_SUBSISTENCE = 0.15; // Was 0.2, reduced for bootstrap
+// EMERGENT SUBSISTENCE: Base values that regions modify based on climate/culture/development
+// These are STARTING POINTS, not universal truths
+constexpr double BASE_FOOD_SUBSISTENCE = 0.7;      // varies by climate: cold regions need more
+constexpr double BASE_ENERGY_SUBSISTENCE = 0.35;   // varies by latitude: cold/hot extremes need more
+constexpr double BASE_TOOLS_SUBSISTENCE = 0.2;     // varies by development: industrial regions need more
+constexpr double BASE_LUXURY_SUBSISTENCE = 0.0;    // varies by culture: status-driven cultures need more
+constexpr double BASE_SERVICES_SUBSISTENCE = 0.15; // varies by urbanization: cities need more
+
+// Regional subsistence modifiers (computed per-region based on geography)
+struct RegionalNeeds {
+    double food = BASE_FOOD_SUBSISTENCE;
+    double energy = BASE_ENERGY_SUBSISTENCE;
+    double tools = BASE_TOOLS_SUBSISTENCE;
+    double luxury = BASE_LUXURY_SUBSISTENCE;
+    double services = BASE_SERVICES_SUBSISTENCE;
+};
+
+// Compute regional needs based on geography and development
+RegionalNeeds computeRegionalNeeds(double x, double y, double development, double population_density) {
+    RegionalNeeds needs;
+    
+    // Climate proxy: y-coordinate (0=south/warm, 1=north/cold)
+    double climate_factor = std::abs(y - 0.5) * 2.0;  // 0 at equator, 1 at poles
+    
+    // Food needs: cold climates need more calories
+    needs.food = BASE_FOOD_SUBSISTENCE * (1.0 + climate_factor * 0.3);
+    
+    // Energy needs: extreme climates (hot or cold) need more
+    double latitude_extreme = std::abs(y - 0.5) * 2.0;
+    needs.energy = BASE_ENERGY_SUBSISTENCE * (1.0 + latitude_extreme * 0.5);
+    
+    // Tools needs: developed regions have higher tool dependency
+    needs.tools = BASE_TOOLS_SUBSISTENCE * (0.8 + development * 0.4);
+    
+    // Luxury needs: emerges with development and urbanization
+    needs.luxury = BASE_LUXURY_SUBSISTENCE + development * 0.15 + population_density * 0.05;
+    
+    // Services needs: urban areas need more services
+    needs.services = BASE_SERVICES_SUBSISTENCE * (0.7 + population_density * 0.6);
+    
+    return needs;
+}
 
 // Development rates
 constexpr double DEVELOPMENT_GROWTH_RATE = 0.01;  // per tick with surplus
@@ -36,6 +74,8 @@ constexpr double PRICE_ADJUSTMENT_RATE = 0.05;  // per tick based on supply/dema
 // Transport cost (scales with distance)
 constexpr double BASE_TRANSPORT_COST = 0.02;  // 2% per hop
 
+Economy::~Economy() = default;
+
 void Economy::init(std::uint32_t num_regions,
                    std::uint32_t num_agents,
                    std::mt19937_64& rng,
@@ -47,10 +87,29 @@ void Economy::init(std::uint32_t num_regions,
     start_condition_name_ = start_condition;
     start_profile_ = resolveStartCondition(start_condition);
     
+    // Initialize trade network
+    trade_network_ = std::make_unique<TradeNetwork>();
+    trade_network_->configure(num_regions);
+    
     std::normal_distribution<double> devNoise(0.0, start_profile_.developmentJitter);
+    
+    // Arrange regions in a grid for geographic calculations
+    // e.g., 200 regions → 14x14 grid (196) + 4 extra
+    std::uint32_t gridSize = static_cast<std::uint32_t>(std::ceil(std::sqrt(num_regions)));
+    std::uniform_real_distribution<double> jitter(-0.3, 0.3);  // position jitter within cell
+    
     for (std::uint32_t i = 0; i < num_regions; ++i) {
         RegionalEconomy region;
         region.region_id = i;
+        
+        // Place in grid with slight randomization
+        std::uint32_t gridX = i % gridSize;
+        std::uint32_t gridY = i / gridSize;
+        region.x = (gridX + 0.5 + jitter(rng) * 0.5) / gridSize;  // normalize to [0,1]
+        region.y = (gridY + 0.5 + jitter(rng) * 0.5) / gridSize;
+        region.x = std::clamp(region.x, 0.0, 1.0);
+        region.y = std::clamp(region.y, 0.0, 1.0);
+        
         double devSample = start_profile_.baseDevelopment + devNoise(rng);
         region.development = std::clamp(devSample, 0.02, 5.0);
         region.economic_system = start_profile_.defaultSystem;  // Initial system
@@ -134,24 +193,18 @@ void Economy::computeWelfare() {
 
 void Economy::computeInequality(const std::vector<Agent>& agents) {
     // Compute Gini coefficient for each region based on agent wealth
+    // This is now FULLY EMERGENT - no overrides based on economic system labels
     for (std::size_t i = 0; i < regions_.size(); ++i) {
         if (regions_[i].population == 0) {
             regions_[i].inequality = 0.0;
             continue;
         }
         
-        // Compute Gini from agent wealth distribution
+        // Compute Gini from agent wealth distribution - this is the TRUE inequality
         double gini = computeRegionGini(static_cast<std::uint32_t>(i), agents);
         
-        // Also factor in economic system's inherent inequality
-        if (regions_[i].economic_system == "market") {
-            gini = std::max(gini, 0.35 + regions_[i].development * 0.05);
-        } else if (regions_[i].economic_system == "planned") {
-            gini = std::min(gini, 0.15 + regions_[i].development * 0.02);
-        } else if (regions_[i].economic_system == "feudal") {
-            gini = std::max(gini, 0.55 + regions_[i].development * 0.03);
-        }
-        
+        // No more overrides! The economic system's inequality emerges from
+        // actual agent wealth distribution, not predetermined assumptions
         regions_[i].inequality = gini;
     }
 }
@@ -169,14 +222,25 @@ void Economy::computeHardship() {
         double tools_per_capita = region.consumption[TOOLS] / region.population;
         double services_per_capita = region.consumption[SERVICES] / region.population;
         
-        double food_deficit = std::max(0.0, FOOD_SUBSISTENCE - food_per_capita) / FOOD_SUBSISTENCE;
-        double energy_deficit = std::max(0.0, ENERGY_SUBSISTENCE - energy_per_capita) / ENERGY_SUBSISTENCE;
-        double tools_deficit = std::max(0.0, TOOLS_SUBSISTENCE - tools_per_capita) / TOOLS_SUBSISTENCE;
-        double services_deficit = std::max(0.0, SERVICES_SUBSISTENCE - services_per_capita) / SERVICES_SUBSISTENCE;
+        // EMERGENT NEEDS: Regional subsistence varies by geography and development
+        double pop_density = region.population / 500.0;  // normalized density
+        RegionalNeeds needs = computeRegionalNeeds(region.x, region.y, region.development, pop_density);
         
-        // Weighted average (food and energy most critical)
-        region.hardship = (food_deficit * 0.4 + energy_deficit * 0.3 + 
-                          tools_deficit * 0.15 + services_deficit * 0.15);
+        double food_deficit = std::max(0.0, needs.food - food_per_capita) / needs.food;
+        double energy_deficit = std::max(0.0, needs.energy - energy_per_capita) / needs.energy;
+        double tools_deficit = std::max(0.0, needs.tools - tools_per_capita) / std::max(0.01, needs.tools);
+        double services_deficit = std::max(0.0, needs.services - services_per_capita) / std::max(0.01, needs.services);
+        
+        // EMERGENT WEIGHTS: Priorities vary by development level
+        // Undeveloped regions: food is critical (survival focus)
+        // Developed regions: services/tools matter more (quality of life focus)
+        double food_weight = 0.5 - region.development * 0.15;      // 0.50 → 0.35
+        double energy_weight = 0.3 - region.development * 0.05;    // 0.30 → 0.25  
+        double tools_weight = 0.1 + region.development * 0.10;     // 0.10 → 0.20
+        double services_weight = 0.1 + region.development * 0.10;  // 0.10 → 0.20
+        
+        region.hardship = (food_deficit * food_weight + energy_deficit * energy_weight + 
+                          tools_deficit * tools_weight + services_deficit * services_weight);
         region.hardship = std::max(0.0, std::min(1.0, region.hardship));
     }
 }
@@ -256,18 +320,49 @@ void Economy::initializeEndowments(std::mt19937_64& rng) {
 }
 
 void Economy::initializeTradeNetwork() {
-    // Simple trade network: each region trades with 5-10 neighbors
-    // For now, use simple spatial proximity (adjacent region IDs)
+    // EMERGENT TRADE NETWORK: Partner count varies by geographic position and development
+    // Coastal/central regions naturally have more partners than isolated ones
+    std::vector<std::vector<std::uint32_t>> trade_partners(regions_.size());
+    
+    // Grid dimensions for geographic distance
+    int grid_size = static_cast<int>(std::ceil(std::sqrt(regions_.size())));
+    
     for (std::size_t i = 0; i < regions_.size(); ++i) {
         regions_[i].trade_partners.clear();
         
-        // Trade with nearby regions (wrapping around)
-        for (int offset = -5; offset <= 5; ++offset) {
-            if (offset == 0) continue;
-            int partner = (static_cast<int>(i) + offset + static_cast<int>(regions_.size())) 
-                         % static_cast<int>(regions_.size());
-            regions_[i].trade_partners.push_back(static_cast<std::uint32_t>(partner));
+        // Position in conceptual grid
+        int row_i = static_cast<int>(i) / grid_size;
+        int col_i = static_cast<int>(i) % grid_size;
+        double centrality = 1.0 - (std::abs(row_i - grid_size/2.0) + std::abs(col_i - grid_size/2.0)) / grid_size;
+        
+        // Central regions have more trade connections (2-15 based on position)
+        int base_partners = 2 + static_cast<int>(centrality * 8);
+        int partner_variance = static_cast<int>(regions_[i].development * 5); // developed regions trade more
+        int max_partners = std::min(base_partners + partner_variance, static_cast<int>(regions_.size()) - 1);
+        
+        // Find partners by geographic proximity (not fixed offset)
+        std::vector<std::pair<double, std::uint32_t>> distance_to_region;
+        for (std::size_t j = 0; j < regions_.size(); ++j) {
+            if (i == j) continue;
+            int row_j = static_cast<int>(j) / grid_size;
+            int col_j = static_cast<int>(j) % grid_size;
+            double dist = std::sqrt((row_i - row_j) * (row_i - row_j) + (col_i - col_j) * (col_i - col_j));
+            // Add some randomness to distance (simulates terrain/historical routes)
+            dist *= (0.8 + regions_[j].endowments[0] * 0.4); // resource-rich regions are "closer"
+            distance_to_region.push_back({dist, static_cast<std::uint32_t>(j)});
         }
+        
+        // Sort by effective distance and take nearest partners
+        std::sort(distance_to_region.begin(), distance_to_region.end());
+        for (int k = 0; k < max_partners && k < static_cast<int>(distance_to_region.size()); ++k) {
+            regions_[i].trade_partners.push_back(distance_to_region[k].second);
+            trade_partners[i].push_back(distance_to_region[k].second);
+        }
+    }
+    
+    // Build matrix topology
+    if (trade_network_) {
+        trade_network_->buildTopology(trade_partners);
     }
 }
 
@@ -332,52 +427,38 @@ void Economy::computeTrade() {
         }
     }
     
-    // Compute trade flows based on surplus/deficit and prices
-    for (auto& region : regions_) {
-        if (region.population == 0) continue;
+    if (!trade_network_) return;
+    
+    // Build production and demand vectors
+    std::vector<std::array<double, kGoodTypes>> production(regions_.size());
+    std::vector<std::array<double, kGoodTypes>> demand(regions_.size());
+    std::vector<std::uint32_t> population(regions_.size());
+    
+    for (std::size_t i = 0; i < regions_.size(); ++i) {
+        production[i] = regions_[i].production;
+        population[i] = regions_[i].population;
         
-        for (int g = 0; g < kGoodTypes; ++g) {
-            double per_capita = region.production[g] / region.population;
-            double subsistence = (g == FOOD) ? FOOD_SUBSISTENCE : 
-                               (g == ENERGY) ? ENERGY_SUBSISTENCE :
-                               (g == TOOLS) ? TOOLS_SUBSISTENCE :
-                               (g == SERVICES) ? SERVICES_SUBSISTENCE : LUXURY_SUBSISTENCE;
-            
-            double surplus = region.production[g] - (region.population * subsistence);
-            
-            if (surplus > 0.0) {
-                // Region has surplus - export to deficient partners
-                double available_export = surplus * 0.7;  // keep some reserve
-                double export_per_partner = available_export / region.trade_partners.size();
-                
-                for (auto partner_id : region.trade_partners) {
-                    auto& partner = regions_[partner_id];
-                    double partner_deficit = (partner.population * subsistence) - partner.production[g];
-                    
-                    if (partner_deficit > 0.0) {
-                        double trade_amount = std::min(export_per_partner, partner_deficit * 0.5);
-                        
-                        // Calculate transport cost based on "distance" (simplified)
-                        int distance = std::abs(static_cast<int>(region.region_id) - static_cast<int>(partner_id));
-                        distance = std::min(distance, static_cast<int>(regions_.size()) - distance);  // wrap around
-                        double transport_cost = BASE_TRANSPORT_COST * distance;
-                        
-                        TradeLink link;
-                        link.from_region = region.region_id;
-                        link.to_region = partner_id;
-                        link.good = static_cast<GoodType>(g);
-                        link.volume = trade_amount;
-                        link.transport_cost = transport_cost;
-                        link.price = region.prices[g];
-                        
-                        trade_links_.push_back(link);
-                        
-                        region.trade_balance[g] -= trade_amount;  // export
-                        partner.trade_balance[g] += trade_amount * (1.0 - transport_cost);  // import (minus transport loss)
-                    }
-                }
-            }
+        // EMERGENT DEMAND: Compute regional needs based on geography and development
+        if (population[i] > 0) {
+            double pop_density = population[i] / 500.0;
+            RegionalNeeds needs = computeRegionalNeeds(regions_[i].x, regions_[i].y, 
+                                                        regions_[i].development, pop_density);
+            demand[i][FOOD] = population[i] * (needs.food + regions_[i].welfare * 0.2);
+            demand[i][ENERGY] = population[i] * (needs.energy + regions_[i].welfare * 0.3);
+            demand[i][TOOLS] = population[i] * (needs.tools + regions_[i].welfare * 0.2);
+            demand[i][LUXURY] = population[i] * (needs.luxury + regions_[i].welfare * 0.5);
+            demand[i][SERVICES] = population[i] * (needs.services + regions_[i].welfare * 0.4);
+        } else {
+            demand[i].fill(0.0);
         }
+    }
+    
+    // Compute flows via matrix diffusion (single operation replaces all loops)
+    auto trade_balances = trade_network_->computeFlows(production, demand, population, 0.15);
+    
+    // Apply trade balances to regions
+    for (std::size_t i = 0; i < regions_.size(); ++i) {
+        regions_[i].trade_balance = trade_balances[i];
     }
 }
 
@@ -396,12 +477,16 @@ void Economy::updatePrices() {
     for (auto& region : regions_) {
         if (region.population == 0) continue;
         
+        // Get regional needs for price calculation
+        double pop_density = region.population / 500.0;
+        RegionalNeeds needs = computeRegionalNeeds(region.x, region.y, region.development, pop_density);
+        
         for (int g = 0; g < kGoodTypes; ++g) {
             double supply = region.production[g];
-            double subsistence = (g == FOOD) ? FOOD_SUBSISTENCE : 
-                               (g == ENERGY) ? ENERGY_SUBSISTENCE :
-                               (g == TOOLS) ? TOOLS_SUBSISTENCE :
-                               (g == SERVICES) ? SERVICES_SUBSISTENCE : LUXURY_SUBSISTENCE;
+            double subsistence = (g == FOOD) ? needs.food : 
+                               (g == ENERGY) ? needs.energy :
+                               (g == TOOLS) ? needs.tools :
+                               (g == SERVICES) ? needs.services : needs.luxury;
             double demand = region.population * (subsistence + region.welfare * 0.5);  // demand increases with welfare
             
             double supply_demand_ratio = (demand > 0) ? (supply / demand) : 1.0;
@@ -415,8 +500,17 @@ void Economy::updatePrices() {
                 region.prices[g] *= (1.0 - PRICE_ADJUSTMENT_RATE * 0.5);
             }
             
-            // Keep prices within reasonable bounds
-            region.prices[g] = std::max(0.1, std::min(10.0, region.prices[g]));
+            // EMERGENT PRICE BOUNDS: Extreme prices naturally correct through market forces
+            // Very low prices attract buyers (demand spike), very high prices attract sellers (supply spike)
+            // Only prevent numerical instability (not economic "reasonableness")
+            double price = region.prices[g];
+            if (price < 0.01) {
+                // Price floor only for numerical stability - near-free goods get hoarded
+                region.prices[g] = 0.01 + supply_demand_ratio * 0.05;
+            } else if (price > 100.0) {
+                // Ceiling only for numerical stability - hyperinflation triggers barter/alternatives
+                region.prices[g] = 100.0 * (1.0 - (price - 100.0) / price * 0.1);
+            }
         }
     }
 }
@@ -479,20 +573,34 @@ void Economy::distributeIncome(const std::vector<Agent>& agents) {
         // Wealth can't go negative
         agent.wealth = std::max(0.0, agent.wealth);
         
-        // Economic system affects income distribution
-        if (region.economic_system == "market") {
-            // Market systems increase inequality (winner-take-all)
-            agent.productivity *= 1.001;  // compound growth for productive agents
-        } else if (region.economic_system == "planned") {
-            // Planned systems compress income distribution
-            agent.income = agent.income * 0.7 + (sector_production / region.population) * 0.3;
-        } else if (region.economic_system == "feudal") {
-            // Feudal systems concentrate wealth at top
-            if (agent.wealth > 2.0) {
-                agent.income *= 1.5;  // elites get rents
-            } else {
-                agent.income *= 0.7;  // peasants get less
-            }
+        // EMERGENT INCOME DYNAMICS: Based on wealth, productivity, and regional conditions
+        // No hardcoded system-based multipliers!
+        
+        // Wealth begets wealth (capital returns) - this is emergent from having capital
+        double wealth_return = std::log1p(agent.wealth) * 0.01;  // diminishing returns
+        agent.income += wealth_return;
+        
+        // Productivity compounds slowly based on experience (proxied by wealth accumulation)
+        if (agent.productivity < 3.0) {
+            agent.productivity *= (1.0 + 0.0005 * agent.productivity);  // slower compound growth
+        }
+        
+        // Regional economic conditions affect all incomes
+        double regional_multiplier = 0.8 + region.efficiency * 0.4;  // 0.8-1.2 based on efficiency
+        agent.income *= regional_multiplier;
+        
+        // Competition effect: in regions with high inequality, median incomes compress
+        // while top incomes grow (emergent Matthew effect)
+        double regional_avg_wealth = (region.population > 0) 
+            ? (sector_production / region.population) : 1.0;
+        double relative_position = agent.wealth / std::max(0.1, regional_avg_wealth);
+        
+        if (relative_position > 2.0) {
+            // Above-average wealth → slight income boost from network effects
+            agent.income *= 1.0 + 0.1 * std::min(1.0, (relative_position - 2.0));
+        } else if (relative_position < 0.5) {
+            // Below-average wealth → slight income penalty from lack of capital
+            agent.income *= 0.9 + 0.2 * relative_position;
         }
         
         // Compute agent hardship
@@ -564,35 +672,58 @@ void Economy::evolveEconomicSystems(const std::vector<std::array<double, 4>>& re
         std::string ideal_system = determineEconomicSystem(beliefs, region.development, 
                                                            region.hardship, region.inequality);
         
-        // Gradual transition toward ideal system
+        // EMERGENT SYSTEM TRANSITION: Gradual probability-based change
+        // Systems don't flip at magic thresholds - they shift under sustained pressure
         if (region.economic_system != ideal_system) {
-            // System change happens during crisis or prosperity
-            if (region.hardship > 0.6 || region.welfare > 1.5) {
+            // Transition pressure builds from multiple sources
+            double hardship_pressure = std::max(0.0, (region.hardship - 0.3) * 0.5); // starts building at 0.3
+            double prosperity_pressure = std::max(0.0, (region.welfare - 0.8) * 0.3); // success enables experimentation
+            double instability_pressure = (1.0 - region.system_stability) * 0.2; // unstable systems more likely to change
+            double inequality_pressure = std::max(0.0, (region.inequality - 0.4) * 0.3); // high inequality → unrest
+            
+            double total_pressure = hardship_pressure + prosperity_pressure + instability_pressure + inequality_pressure;
+            
+            // Probabilistic transition: higher pressure = higher chance
+            // Even low pressure has tiny chance; high pressure makes change likely but not guaranteed
+            double transition_prob = std::min(0.5, total_pressure * 0.1); // max 50% per tick
+            std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
+            static std::mt19937 sys_rng(42); // local RNG for system transitions
+            
+            if (prob_dist(sys_rng) < transition_prob) {
                 region.economic_system = ideal_system;
-                region.system_stability = 0.3;  // unstable during transition
+                region.system_stability = 0.2 + 0.2 * (1.0 - total_pressure); // harder transitions = less stable result
             }
         } else {
             // Stable system
             region.system_stability = std::min(1.0, region.system_stability + 0.01);
         }
         
-        // Set efficiency based on system and stability
-        if (region.economic_system == "market") {
-            region.efficiency = 0.9 + region.system_stability * 0.1;
-            region.inequality = 0.35 + region.development * 0.05;
-        } else if (region.economic_system == "planned") {
-            region.efficiency = 0.65 + region.system_stability * 0.15;
-            region.inequality = 0.15 + region.development * 0.02;
-        } else if (region.economic_system == "cooperative") {
-            region.efficiency = 0.75 + region.system_stability * 0.15;
-            region.inequality = 0.20 + region.development * 0.03;
-        } else if (region.economic_system == "feudal") {
-            region.efficiency = 0.5 + region.system_stability * 0.1;
-            region.inequality = 0.55 + region.development * 0.03;
-        } else {  // mixed
-            region.efficiency = 0.80 + region.system_stability * 0.1;
-            region.inequality = 0.28 + region.development * 0.04;
+        // EMERGENT EFFICIENCY: Based on actual production performance, not system labels
+        // Efficiency emerges from: stability, development, and production/consumption ratio
+        double production_total = 0.0;
+        double consumption_total = 0.0;
+        for (int g = 0; g < kGoodTypes; ++g) {
+            production_total += region.production[g];
+            consumption_total += region.consumption[g];
         }
+        
+        // Base efficiency from how well production meets consumption needs
+        double production_efficiency = (consumption_total > 0) 
+            ? std::min(1.0, production_total / (consumption_total + 1.0))
+            : 0.5;
+        
+        // Stability and development contribute to efficiency
+        double stability_bonus = region.system_stability * 0.2;
+        double development_bonus = std::min(0.2, region.development * 0.04);
+        
+        // Emergent efficiency: base + stability + development
+        region.efficiency = std::clamp(
+            0.5 + production_efficiency * 0.3 + stability_bonus + development_bonus,
+            0.3, 1.0
+        );
+        
+        // NOTE: Inequality is computed separately in computeInequality() from actual agent wealth
+        // No hardcoded inequality values here - it's fully emergent!
     }
 }
 
@@ -892,11 +1023,15 @@ double Economy::globalDevelopment() const {
 }
 
 double Economy::getTotalTrade() const {
+    // Sum absolute trade balance flows across all regions and goods
+    // (each unit traded appears once as export, once as import, so divide by 2)
     double total = 0.0;
-    for (const auto& link : trade_links_) {
-        total += link.volume;
+    for (const auto& region : regions_) {
+        for (int g = 0; g < kGoodTypes; ++g) {
+            total += std::abs(region.trade_balance[g]);
+        }
     }
-    return total;
+    return total / 2.0;  // Avoid double-counting
 }
 
 void Economy::setEconomicModel(const std::string& model) {

@@ -37,7 +37,30 @@ void HealthModule::updateAgents(std::vector<Agent>& agents, const Economy& econo
         const double foodPerCapita = reg.production[GoodType::FOOD] / population;
         snapshot.nutrition = clamp01(foodPerCapita);
         snapshot.healthcare = clamp01(reg.welfare * 0.5 + reg.tech_multipliers[GoodType::SERVICES] * 0.5);
-        snapshot.infection_pressure = clamp01(0.4 * reg.hardship + 0.3 * (1.0 - reg.welfare) + 0.3 * (1.0 - reg.efficiency));
+        
+        // EMERGENT INFECTION PRESSURE: Weights vary by region characteristics
+        // Dense urban regions: sanitation matters most
+        // Rural regions: healthcare access matters most
+        // Poor regions: hardship is dominant factor
+        double density = population / 500.0;  // normalized density
+        double urbanization = std::min(1.0, density);
+        
+        // Adaptive weights based on region type
+        double hardship_weight = 0.3 + 0.2 * (1.0 - reg.development);  // 0.3-0.5
+        double welfare_weight = 0.2 + 0.2 * reg.development;           // 0.2-0.4  
+        double efficiency_weight = 0.2 + 0.2 * urbanization;           // 0.2-0.4 (sanitation in cities)
+        
+        // Normalize weights
+        double total_weight = hardship_weight + welfare_weight + efficiency_weight;
+        hardship_weight /= total_weight;
+        welfare_weight /= total_weight;
+        efficiency_weight /= total_weight;
+        
+        snapshot.infection_pressure = clamp01(
+            hardship_weight * reg.hardship + 
+            welfare_weight * (1.0 - reg.welfare) + 
+            efficiency_weight * (1.0 - reg.efficiency)
+        );
         snapshot.avg_health = 0.0;
     }
 

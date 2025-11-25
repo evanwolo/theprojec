@@ -1,5 +1,5 @@
-#ifndef MOVEMENT_H
-#define MOVEMENT_H
+#ifndef GAME_MOVEMENT_H
+#define GAME_MOVEMENT_H
 
 #include <array>
 #include <vector>

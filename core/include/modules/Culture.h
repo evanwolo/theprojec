@@ -15,7 +15,10 @@ struct Cluster {
     std::array<double, 4> centroid{0, 0, 0, 0};
     std::vector<std::uint32_t> members;
     double coherence = 0.0;
-    std::array<double, 4> languageShare{0, 0, 0, 0};
+    std::array<double, 4> languageShare{0, 0, 0, 0};  // share per language family
+    std::uint8_t dominantLang = 0;                     // most common language family
+    std::uint8_t dominantDialect = 0;                  // most common dialect
+    double linguisticHomogeneity = 0.0;                // how uniform is language
     std::vector<std::pair<std::uint32_t, double>> topRegions;
     std::uint64_t birthTick = 0;
     std::uint64_t deathTick = 0;

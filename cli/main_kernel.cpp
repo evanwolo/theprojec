@@ -2,7 +2,9 @@
 #include "io/Snapshot.h"
 #include "modules/Culture.h"
 #include "modules/Economy.h"
+#ifdef HAS_GAME_MODULES
 #include "modules/Movement.h"
+#endif
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -48,7 +50,8 @@ static void printClusters(const std::vector<Cluster>& clusters, const Kernel& ke
     std::cout << "Silhouette: " << metrics.silhouette << "\n";
     std::cout << "Diversity: " << metrics.diversity << "\n\n";
 
-    const char* langNames[] = {"Lang0", "Lang1", "Lang2", "Lang3"};
+    // Language family names (can be customized)
+    const char* langNames[] = {"Western", "Eastern", "Northern", "Southern"};
 
     for (const auto& cluster : clusters) {
         std::cout << std::setprecision(2)
@@ -62,7 +65,12 @@ static void printClusters(const std::vector<Cluster>& clusters, const Kernel& ke
         }
         std::cout << "]\n";
 
-        std::cout << "  Languages: ";
+        // Show dominant language with dialect and linguistic homogeneity
+        std::cout << "  Dominant language: " << langNames[cluster.dominantLang]
+                  << " (dialect " << static_cast<int>(cluster.dominantDialect) << ")"
+                  << ", homogeneity=" << std::setprecision(1) << cluster.linguisticHomogeneity * 100.0 << "%\n";
+
+        std::cout << "  Language mix: ";
         bool anyLang = false;
         for (int l = 0; l < 4; ++l) {
             if (cluster.languageShare[l] > 0.01) {
@@ -89,6 +97,10 @@ static void printClusters(const std::vector<Cluster>& clusters, const Kernel& ke
 }
 
 static std::vector<Cluster> g_lastClusters;
+
+#ifdef HAS_GAME_MODULES
+static MovementModule g_movements;
+#endif
 
 int main(int argc, char** argv) {
     KernelConfig cfg;
@@ -284,16 +296,18 @@ int main(int argc, char** argv) {
             std::cout << "Average income: " << std::setprecision(2) << stats.avgIncome << "\n\n";
             
             // Languages
+            const char* langFamilies[] = {"Western", "Eastern", "Northern", "Southern"};
             std::cout << "--- LANGUAGES ---\n";
-            std::cout << "Active languages: " << static_cast<int>(stats.numLanguages) << "\n";
-            for (int i = 0; i < 256; ++i) {
+            std::cout << "Language families: " << static_cast<int>(stats.numLanguages) << "\n";
+            for (int i = 0; i < 4; ++i) {
                 if (stats.langCounts[i] > 0) {
-                    std::cout << "  Language " << static_cast<int>(i) << ": " 
+                    std::cout << "  " << langFamilies[i] << ": " 
                               << stats.langCounts[i] << " speakers"
                               << " (" << std::setprecision(1) 
                               << (100.0 * stats.langCounts[i] / stats.aliveAgents) << "%)\n";
                 }
             }
+            std::cout << "  (Geographic zones: NW=Western, NE=Eastern, SW=Northern, SE=Southern)\n";
             std::cout << "\n";
             std::cout.flush();
             } catch (const std::exception& e) {
@@ -409,8 +423,19 @@ int main(int argc, char** argv) {
                 std::cout << "Invalid region ID\n";
             } else {
                 const auto& region = kernel.economy().getRegion(rid);
-                std::cout << "\n=== Region " << rid << " Economy ===\n";
+                std::cout << "\n=== Region " << rid << " ===\n";
                 std::cout << std::fixed << std::setprecision(3);
+                
+                // Geographic info
+                std::cout << "Location: (" << region.x << ", " << region.y << ")";
+                // Determine quadrant/language zone
+                const char* quadrant;
+                if (region.x < 0.5 && region.y >= 0.5) quadrant = "Northwest (Western)";
+                else if (region.x >= 0.5 && region.y >= 0.5) quadrant = "Northeast (Eastern)";
+                else if (region.x < 0.5 && region.y < 0.5) quadrant = "Southwest (Northern)";
+                else quadrant = "Southeast (Southern)";
+                std::cout << " - " << quadrant << "\n\n";
+                
                 std::cout << "Population: " << region.population << "\n";
                 std::cout << "Economic System: " << region.economic_system << "\n";
                 std::cout << "Development: " << region.development << "\n";
@@ -480,23 +505,26 @@ int main(int argc, char** argv) {
             std::cout.flush();
             
         } else if (cmd == "detect_movements") {
+#ifdef HAS_GAME_MODULES
             if (g_lastClusters.empty()) {
                 std::cerr << "No clusters detected. Run 'cluster kmeans K' or 'cluster dbscan' first.\n";
                 continue;
             }
             
             std::cerr << "Detecting movements from " << g_lastClusters.size() << " clusters...\n";
-            auto& movMod = kernel.movementsMut();
-            movMod.update(kernel, g_lastClusters, kernel.generation());
+            g_movements.update(kernel, g_lastClusters, kernel.generation());
             
-            auto stats = movMod.computeStats();
+            auto stats = g_movements.computeStats();
             std::cout << "Detected " << stats.totalMovements << " movements (" 
                       << stats.totalMembership << " total members)\n";
             std::cout.flush();
+#else
+            std::cerr << "Movement module not available (built without HAS_GAME_MODULES)\n";
+#endif
             
         } else if (cmd == "movements") {
-            const auto& movMod = kernel.movements();
-            auto stats = movMod.computeStats();
+#ifdef HAS_GAME_MODULES
+            auto stats = g_movements.computeStats();
             
             std::cout << "\n=== Active Movements (Generation " << kernel.generation() << ") ===\n";
             std::cout << "Total movements: " << stats.totalMovements << "\n";
@@ -506,7 +534,7 @@ int main(int argc, char** argv) {
             std::cout << "Stages: Birth=" << stats.birthStage << " Growth=" << stats.growthStage
                       << " Plateau=" << stats.plateauStage << " Decline=" << stats.declineStage << "\n\n";
             
-            auto byPower = movMod.movementsByPower();
+            auto byPower = g_movements.movementsByPower();
             const char* stageNames[] = {"Birth", "Growth", "Plateau", "Schism", "Decline", "Dead"};
             
             for (const auto* mov : byPower) {
@@ -539,16 +567,19 @@ int main(int argc, char** argv) {
                 std::cout << "\n";
             }
             std::cout.flush();
+#else
+            std::cerr << "Movement module not available (built without HAS_GAME_MODULES)\n";
+#endif
             
         } else if (cmd == "movement") {
+#ifdef HAS_GAME_MODULES
             std::uint32_t movId;
             if (!(iss >> movId)) {
                 std::cerr << "Usage: movement ID\n";
                 continue;
             }
             
-            auto& movMod = kernel.movementsMut();
-            auto* mov = movMod.findMovement(movId);
+            auto* mov = g_movements.findMovement(movId);
             if (!mov) {
                 std::cerr << "Movement #" << movId << " not found.\n";
                 continue;
@@ -590,6 +621,9 @@ int main(int argc, char** argv) {
                 }
             }
             std::cout.flush();
+#else
+            std::cerr << "Movement module not available (built without HAS_GAME_MODULES)\n";
+#endif
             
         } else if (cmd == "quit") {
             break;

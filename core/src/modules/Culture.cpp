@@ -254,6 +254,7 @@ void enrichClusters(std::vector<Cluster>& clusters, const Kernel& kernel) {
         std::array<double, 4> sq{0, 0, 0, 0};
         std::array<int, 4> langs{0, 0, 0, 0};
         std::unordered_map<std::uint32_t, int> regionCounts;
+        std::unordered_map<std::uint16_t, int> dialectCounts;  // key = lang*256 + dialect
 
         for (auto aid : cluster.members) {
             const auto& agent = agents[aid];
@@ -263,6 +264,9 @@ void enrichClusters(std::vector<Cluster>& clusters, const Kernel& kernel) {
             }
             langs[agent.primaryLang]++;
             regionCounts[agent.region]++;
+            // Track dialect distribution
+            std::uint16_t dialectKey = static_cast<std::uint16_t>(agent.primaryLang) * 256 + agent.dialect;
+            dialectCounts[dialectKey]++;
         }
 
         for (int d = 0; d < 4; ++d) {
@@ -277,9 +281,33 @@ void enrichClusters(std::vector<Cluster>& clusters, const Kernel& kernel) {
         variance = std::max(0.0, variance / 4.0);
         cluster.coherence = std::max(0.0, 1.0 - variance);
 
+        // Language family shares
+        int maxLangCount = 0;
         for (int l = 0; l < 4; ++l) {
             cluster.languageShare[l] = static_cast<double>(langs[l]) / cluster.members.size();
+            if (langs[l] > maxLangCount) {
+                maxLangCount = langs[l];
+                cluster.dominantLang = static_cast<std::uint8_t>(l);
+            }
         }
+        
+        // Find dominant dialect
+        int maxDialectCount = 0;
+        for (const auto& [key, count] : dialectCounts) {
+            if (count > maxDialectCount) {
+                maxDialectCount = count;
+                cluster.dominantDialect = static_cast<std::uint8_t>(key & 0xFF);
+            }
+        }
+        
+        // Linguistic homogeneity: how concentrated is the language distribution
+        // 1.0 = everyone speaks same language, 0.25 = uniform across 4 languages
+        double sumSqShare = 0.0;
+        for (int l = 0; l < 4; ++l) {
+            sumSqShare += cluster.languageShare[l] * cluster.languageShare[l];
+        }
+        // Normalize: (sumSq - 0.25) / 0.75 maps [0.25, 1.0] to [0.0, 1.0]
+        cluster.linguisticHomogeneity = std::max(0.0, (sumSqShare - 0.25) / 0.75);
 
         std::vector<std::pair<std::uint32_t, int>> regionVec(regionCounts.begin(), regionCounts.end());
         std::sort(regionVec.begin(), regionVec.end(), [](const auto& a, const auto& b) {

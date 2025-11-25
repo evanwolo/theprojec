@@ -1,4 +1,4 @@
-# Multi-stage build for Grand Strategy Simulation Engine
+# Multi-stage build for Civilization Simulation Engine
 FROM gcc:13 AS builder
 
 # Install CMake and OpenMP
@@ -14,6 +14,7 @@ WORKDIR /app
 # Copy source files
 COPY CMakeLists.txt ./
 COPY core/ ./core/
+COPY game/ ./game/
 COPY cli/ ./cli/
 COPY tests/ ./tests/
 
