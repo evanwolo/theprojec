@@ -5,11 +5,26 @@
 #include <algorithm>
 #include <numeric>
 #include <unordered_set>
+#include <functional>
+#include <thread>
+#include <atomic>
 #include <omp.h>
 
 // Thread-local RNG for parallel operations (prevents race conditions)
+// Uses a combination of random_device + thread ID + global counter for unique seeding
 namespace {
-    thread_local std::mt19937_64 tl_rng{std::random_device{}()};
+    std::atomic<uint64_t> global_seed_counter{0};
+    
+    uint64_t generateThreadSeed() {
+        std::random_device rd;
+        uint64_t base = rd();
+        uint64_t thread_component = static_cast<uint64_t>(
+            std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        uint64_t counter = global_seed_counter.fetch_add(1, std::memory_order_relaxed);
+        return base ^ (thread_component * 0x9e3779b97f4a7c15ULL) ^ (counter * 0xbf58476d1ce4e5b9ULL);
+    }
+    
+    thread_local std::mt19937_64 tl_rng{generateThreadSeed()};
     
     std::mt19937_64& getThreadLocalRNG() {
         return tl_rng;
@@ -299,12 +314,57 @@ void Kernel::assignLanguagesByGeography() {
 
 void Kernel::updateBeliefs() {
     if (cfg_.useMeanField) {
-        // **MEAN FIELD APPROXIMATION**: O(N) complexity, decoupled from network density
+        // **HYBRID BELIEF INFLUENCE**: Blends neighbor influence with regional field
+        // This enables polarization and echo chambers while maintaining O(N) complexity
+        
         // Compute regional fields once
         mean_field_.computeFields(agents_, regionIndex_);
         
-        // Update each agent based on regional field
+        // Pre-compute neighbor influences in parallel
+        std::vector<NeighborInfluence> neighbor_influences(agents_.size());
         const std::size_t n = agents_.size();
+        
+        #pragma omp parallel for schedule(static)
+        for (std::size_t i = 0; i < n; ++i) {
+            const Agent& agent = agents_[i];
+            if (!agent.alive) continue;
+            
+            auto& influence = neighbor_influences[i];
+            
+            for (std::uint32_t n_idx : agent.neighbors) {
+                if (n_idx >= agents_.size()) continue;
+                const Agent& neighbor = agents_[n_idx];
+                if (!neighbor.alive) continue;
+                
+                // Weight by similarity (homophily - echo chamber effect)
+                double weight = 1.0;
+                
+                // Language bonus: shared language strengthens influence
+                if (neighbor.primaryLang == agent.primaryLang) {
+                    weight *= 1.3;
+                }
+                
+                // Belief similarity bonus (creates echo chambers)
+                double dot = 0.0, norm_a = 0.0, norm_n = 0.0;
+                for (int b = 0; b < 4; ++b) {
+                    dot += agent.B[b] * neighbor.B[b];
+                    norm_a += agent.B[b] * agent.B[b];
+                    norm_n += neighbor.B[b] * neighbor.B[b];
+                }
+                double similarity = (norm_a > 1e-9 && norm_n > 1e-9) ?
+                    dot / (std::sqrt(norm_a) * std::sqrt(norm_n)) : 0.0;
+                weight *= (0.5 + similarity * 0.5);  // 0.5-1.0 based on similarity
+                
+                // Accumulate weighted beliefs
+                for (int b = 0; b < 4; ++b) {
+                    influence.belief_sum[b] += neighbor.B[b] * weight;
+                }
+                influence.total_weight += weight;
+                influence.neighbor_count++;
+            }
+        }
+        
+        // Apply blended influence
         const double stepSize = cfg_.stepSize;
         
         #pragma omp parallel for schedule(dynamic)
@@ -312,31 +372,34 @@ void Kernel::updateBeliefs() {
             auto& agent = agents_[i];
             if (!agent.alive) continue;
             
-            // Get regional field
-            const auto& field = mean_field_.getRegionalField(agent.region);
-            double field_strength = mean_field_.getFieldStrength(agent.region);
+            // Calculate neighbor weight based on conformity and network size
+            // Low conformity = more independent, rely more on neighbors (counter-intuitive but realistic)
+            // High conformity = follow the crowd (regional field)
+            double neighbor_weight = 0.6 - agent.conformity * 0.2;  // 0.4-0.6
             
-            // Compute influence from field
-            double weight = stepSize * field_strength * agent.m_comm * agent.m_susceptibility;
+            // Isolated agents (few neighbors) rely more on regional field
+            if (neighbor_influences[i].neighbor_count < 2) {
+                neighbor_weight = 0.2;  // Mostly regional field
+            }
+            neighbor_weight = std::clamp(neighbor_weight, 0.2, 0.8);
             
-            // Update beliefs toward field
-            std::array<double, 4> dx;
-            dx[0] = weight * fastTanh(field[0] - agent.B[0]);
-            dx[1] = weight * fastTanh(field[1] - agent.B[1]);
-            dx[2] = weight * fastTanh(field[2] - agent.B[2]);
-            dx[3] = weight * fastTanh(field[3] - agent.B[3]);
+            // Get blended social influence
+            auto social_influence = mean_field_.getBlendedInfluence(
+                neighbor_influences[i], agent.region, neighbor_weight
+            );
             
-            // Apply updates
-            agent.x[0] += dx[0];
-            agent.x[1] += dx[1];
-            agent.x[2] += dx[2];
-            agent.x[3] += dx[3];
+            // Update beliefs toward social influence
+            double adapt_rate = stepSize * agent.m_comm * agent.m_susceptibility;
             
-            agent.B[0] = fastTanh(agent.x[0]);
-            agent.B[1] = fastTanh(agent.x[1]);
-            agent.B[2] = fastTanh(agent.x[2]);
-            agent.B[3] = fastTanh(agent.x[3]);
-
+            // Additional modulation by openness (open agents change faster)
+            adapt_rate *= (0.7 + agent.openness * 0.6);
+            
+            for (int b = 0; b < 4; ++b) {
+                double delta = adapt_rate * fastTanh(social_influence[b] - agent.B[b]);
+                agent.x[b] += delta;
+                agent.B[b] = fastTanh(agent.x[b]);
+            }
+            
             // Update cached norm
             agent.B_norm_sq = agent.B[0] * agent.B[0] +
                              agent.B[1] * agent.B[1] +
@@ -344,7 +407,7 @@ void Kernel::updateBeliefs() {
                              agent.B[3] * agent.B[3];
             
             // Validate beliefs (debug builds only)
-            validation::checkBeliefs(agent.B.data(), 4, "updateBeliefs (mean-field)");
+            validation::checkBeliefs(agent.B.data(), 4, "updateBeliefs (hybrid)");
             validation::checkNonNegative(agent.B_norm_sq, "B_norm_sq");
         }
     } else {
@@ -425,7 +488,13 @@ void Kernel::step() {
         // Migration step (every 10 ticks to reduce overhead)
         if (generation_ % 10 == 0) {
             stepMigration();
+            reconnectIsolatedAgents();  // Rebuild networks for migrants
         }
+    }
+    
+    // Language dynamics (generational timescale - every 50 ticks)
+    if (generation_ % 50 == 0) {
+        updateLanguageDynamics();
     }
     
     // Update economy every 10 ticks (reduce overhead)
@@ -1082,24 +1151,64 @@ void Kernel::stepMigration() {
                 // Log migration event
                 event_log_.logMigration(generation_, agent_id, origin, destination);
                 
-                // EMERGENT NETWORK RETENTION: Social skill and tie strength determine what survives
+                // EMERGENT NETWORK RETENTION: Preserve high-value connections instead of random
+                // Strong ties (high belief similarity) survive distance; weak ties break
                 if (agent.neighbors.size() > 2) {
-                    // Sociable agents maintain more connections across distance
-                    double retention_rate = 0.2 + agent.sociality * 0.4; // 20%-60% based on sociality
+                    // Calculate connection value for each neighbor
+                    std::vector<std::pair<double, std::uint32_t>> scored_neighbors;
+                    scored_neighbors.reserve(agent.neighbors.size());
                     
-                    // Long-distance moves lose more connections
+                    for (std::uint32_t neighbor_id : agent.neighbors) {
+                        if (neighbor_id >= agents_.size()) continue;
+                        const auto& neighbor = agents_[neighbor_id];
+                        if (!neighbor.alive) continue;
+                        
+                        // Connection value: combination of belief similarity and social factors
+                        double belief_similarity = 0.0;
+                        for (int d = 0; d < 4; ++d) {
+                            double diff = agent.B[d] - neighbor.B[d];
+                            belief_similarity += diff * diff;
+                        }
+                        belief_similarity = 1.0 - std::sqrt(belief_similarity) / 4.0;  // normalize to [0,1]
+                        
+                        // Language bonus: shared language strengthens ties
+                        double lang_bonus = (agent.primaryLang == neighbor.primaryLang) ? 0.2 : 0.0;
+                        
+                        // Destination region bonus: connections in new region are valuable
+                        double region_bonus = (neighbor.region == destination) ? 0.3 : 0.0;
+                        
+                        // Origin region penalty: connections left behind decay faster
+                        double origin_penalty = (neighbor.region == origin) ? -0.1 : 0.0;
+                        
+                        double value = belief_similarity * 0.5 + lang_bonus + region_bonus + origin_penalty;
+                        
+                        // Sociable agents maintain more connections across distance
+                        value += agent.sociality * 0.2;
+                        
+                        scored_neighbors.emplace_back(value, neighbor_id);
+                    }
+                    
+                    // Sort by value descending
+                    std::sort(scored_neighbors.begin(), scored_neighbors.end(),
+                              [](const auto& a, const auto& b) { return a.first > b.first; });
+                    
+                    // Keep top connections based on sociality
+                    double retention_rate = 0.3 + agent.sociality * 0.4; // 30%-70% based on sociality
+                    
+                    // Long-distance moves lose more connections overall
                     double distance_factor = std::abs(static_cast<int>(destination) - static_cast<int>(origin)) 
                                             / static_cast<double>(cfg_.regions);
-                    retention_rate *= (1.0 - distance_factor * 0.3);
+                    retention_rate *= (1.0 - distance_factor * 0.2);
                     
-                    // Conformist agents try harder to maintain existing ties
-                    retention_rate += agent.conformity * 0.1;
-                    
-                    retention_rate = std::clamp(retention_rate, 0.1, 0.8);
-                    std::size_t keep_count = static_cast<std::size_t>(agent.neighbors.size() * retention_rate);
+                    retention_rate = std::clamp(retention_rate, 0.15, 0.85);
+                    std::size_t keep_count = static_cast<std::size_t>(scored_neighbors.size() * retention_rate);
                     if (keep_count < 1) keep_count = 1;
-                    std::shuffle(agent.neighbors.begin(), agent.neighbors.end(), rng_);
-                    agent.neighbors.resize(keep_count);
+                    
+                    // Rebuild neighbors list with top valued connections
+                    agent.neighbors.clear();
+                    for (std::size_t i = 0; i < keep_count && i < scored_neighbors.size(); ++i) {
+                        agent.neighbors.push_back(scored_neighbors[i].second);
+                    }
                 }
             }
         }
@@ -1325,3 +1434,232 @@ void Kernel::updateRegionalAggregates() {
     // For now, we use periodic full rebuild instead (cheaper than tracking all belief changes)
 }
 
+// ============================================================================
+// Network Reconnection
+// ============================================================================
+
+void Kernel::reconnectIsolatedAgents() {
+    // Run every 20 ticks (called from step() which already gates at 10 ticks)
+    if (generation_ % 20 != 0) return;
+    
+    std::size_t reconnected = 0;
+    const std::size_t max_reconnections = agents_.size() / 100; // 1% cap per tick
+    
+    for (std::size_t i = 0; i < agents_.size() && reconnected < max_reconnections; ++i) {
+        Agent& agent = agents_[i];
+        if (!agent.alive) continue;
+        
+        // Count active local neighbors (in same region and alive)
+        int active_neighbors = 0;
+        for (std::uint32_t n_idx : agent.neighbors) {
+            if (n_idx < agents_.size() && agents_[n_idx].alive && 
+                agents_[n_idx].region == agent.region) {
+                active_neighbors++;
+            }
+        }
+        
+        // Desired connections based on sociality: sociable agents need more connections
+        int desired_min = static_cast<int>(2 + agent.sociality * 4); // 2-6
+        
+        if (active_neighbors < desired_min) {
+            formLocalConnections(i, desired_min - active_neighbors);
+            reconnected++;
+        }
+    }
+}
+
+void Kernel::formLocalConnections(std::size_t agent_idx, int max_new_connections) {
+    Agent& agent = agents_[agent_idx];
+    if (!agent.alive || agent.region >= regionIndex_.size()) return;
+    
+    const auto& local_agents = regionIndex_[agent.region];
+    if (local_agents.size() < 2) return;
+    
+    // Build set of existing neighbors for fast lookup
+    std::unordered_set<std::uint32_t> existing(agent.neighbors.begin(), agent.neighbors.end());
+    
+    // Score candidates by compatibility
+    std::vector<std::pair<double, std::uint32_t>> scored_candidates;
+    scored_candidates.reserve(std::min(local_agents.size(), static_cast<std::size_t>(50)));
+    
+    // Sample candidates (limit to 50 for performance in large regions)
+    std::size_t sample_size = std::min(local_agents.size(), static_cast<std::size_t>(50));
+    std::vector<std::uint32_t> sampled_agents;
+    
+    if (local_agents.size() <= 50) {
+        sampled_agents = local_agents;
+    } else {
+        // Random sample
+        sampled_agents.reserve(50);
+        std::uniform_int_distribution<std::size_t> idx_dist(0, local_agents.size() - 1);
+        std::unordered_set<std::size_t> chosen;
+        while (sampled_agents.size() < 50) {
+            std::size_t idx = idx_dist(rng_);
+            if (chosen.insert(idx).second) {
+                sampled_agents.push_back(local_agents[idx]);
+            }
+        }
+    }
+    
+    for (std::uint32_t c_idx : sampled_agents) {
+        if (c_idx == agent_idx || !agents_[c_idx].alive) continue;
+        if (existing.count(c_idx)) continue;
+        
+        const Agent& candidate = agents_[c_idx];
+        
+        // Score by compatibility
+        // 1. Belief similarity (40% weight)
+        double dot = 0.0, norm_a = 0.0, norm_c = 0.0;
+        for (int b = 0; b < 4; ++b) {
+            dot += agent.B[b] * candidate.B[b];
+            norm_a += agent.B[b] * agent.B[b];
+            norm_c += candidate.B[b] * candidate.B[b];
+        }
+        double belief_sim = (norm_a > 1e-9 && norm_c > 1e-9) ?
+            dot / (std::sqrt(norm_a) * std::sqrt(norm_c)) : 0.0;
+        
+        // 2. Language bonus (30% weight)
+        double language_bonus = (agent.primaryLang == candidate.primaryLang) ? 0.3 : 0.0;
+        
+        // 3. Age proximity bonus (20% weight)
+        double age_diff = std::abs(static_cast<double>(agent.age) - candidate.age);
+        double age_bonus = 0.2 / (1.0 + age_diff / 10.0);
+        
+        // 4. Sociality bonus (10% weight) - sociable people attract connections
+        double sociality_bonus = candidate.sociality * 0.1;
+        
+        double score = belief_sim * 0.4 + language_bonus + age_bonus + sociality_bonus;
+        
+        // Add small random noise to break ties
+        std::uniform_real_distribution<double> noise(-0.05, 0.05);
+        score += noise(rng_);
+        
+        scored_candidates.emplace_back(score, c_idx);
+    }
+    
+    // Sort by score descending
+    std::sort(scored_candidates.begin(), scored_candidates.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    
+    // Form connections probabilistically
+    int formed = 0;
+    std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
+    
+    for (const auto& [score, c_idx] : scored_candidates) {
+        if (formed >= max_new_connections) break;
+        
+        // Connection probability based on compatibility (30-80%)
+        double connect_prob = 0.3 + score * 0.5;
+        
+        if (prob_dist(rng_) < connect_prob) {
+            // Add bidirectional connection
+            agent.neighbors.push_back(c_idx);
+            agents_[c_idx].neighbors.push_back(static_cast<std::uint32_t>(agent_idx));
+            formed++;
+        }
+    }
+}
+
+// ============================================================================
+// Language Dynamics
+// ============================================================================
+
+void Kernel::updateLanguageDynamics() {
+    // Language prestige and shift - runs every 50 ticks (generational timescale)
+    
+    // Structure to track language statistics per region
+    struct LangStats {
+        std::array<std::uint32_t, 4> speakers{0, 0, 0, 0};
+        std::array<double, 4> total_wealth{0.0, 0.0, 0.0, 0.0};
+    };
+    
+    std::vector<LangStats> stats(cfg_.regions);
+    
+    // Gather language statistics
+    for (const auto& agent : agents_) {
+        if (!agent.alive || agent.primaryLang >= 4 || agent.region >= cfg_.regions) continue;
+        stats[agent.region].speakers[agent.primaryLang]++;
+        stats[agent.region].total_wealth[agent.primaryLang] += economy_.getAgentEconomy(agent.id).wealth;
+    }
+    
+    // Update regional language prestige
+    for (std::uint32_t r = 0; r < cfg_.regions; ++r) {
+        auto& region = economy_.getRegionMut(r);
+        const auto& lang_stats = stats[r];
+        
+        double total_pop = 0.0, total_wealth = 0.0;
+        for (int l = 0; l < 4; ++l) {
+            total_pop += lang_stats.speakers[l];
+            total_wealth += lang_stats.total_wealth[l];
+        }
+        
+        if (total_pop < 10) continue;  // Skip regions with too few agents
+        
+        double max_prestige = 0.0;
+        std::uint8_t dominant = 0;
+        
+        for (int l = 0; l < 4; ++l) {
+            double pop_share = lang_stats.speakers[l] / total_pop;
+            double wealth_share = (total_wealth > 0.0) ?
+                lang_stats.total_wealth[l] / total_wealth : 0.25;
+            
+            // Prestige = 40% population share + 60% wealth share
+            double target = pop_share * 0.4 + wealth_share * 0.6;
+            
+            // Smooth update with momentum (90% old, 10% new)
+            region.language_prestige[l] = region.language_prestige[l] * 0.9 + target * 0.1;
+            
+            if (region.language_prestige[l] > max_prestige) {
+                max_prestige = region.language_prestige[l];
+                dominant = static_cast<std::uint8_t>(l);
+            }
+        }
+        
+        region.dominant_language = dominant;
+        
+        // Simpson's diversity index: 1 - sum(share^2)
+        double diversity = 1.0;
+        for (int l = 0; l < 4; ++l) {
+            double share = lang_stats.speakers[l] / total_pop;
+            diversity -= share * share;
+        }
+        region.linguistic_diversity = diversity;
+    }
+    
+    // Language shift for young agents
+    std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
+    
+    for (auto& agent : agents_) {
+        if (!agent.alive || agent.age > 25 || agent.primaryLang >= 4) continue;
+        
+        const auto& region = economy_.getRegion(agent.region);
+        
+        double current_prestige = region.language_prestige[agent.primaryLang];
+        double dominant_prestige = region.language_prestige[region.dominant_language];
+        double prestige_gap = dominant_prestige - current_prestige;
+        
+        // Only shift if dominant language has significantly more prestige
+        if (prestige_gap <= 0.05) continue;
+        
+        // Shift probability based on prestige gap and personality
+        double shift_prob = prestige_gap * 0.3;  // Base: 30% of prestige gap
+        
+        // Openness increases willingness to change language
+        shift_prob *= (0.5 + agent.openness * 0.5);
+        
+        // Conformity increases desire to fit in
+        shift_prob *= (0.5 + agent.conformity * 0.5);
+        
+        // Tradition axis (B[1]) reduces shift - traditional agents preserve heritage language
+        double tradition = (agent.B[1] + 1.0) / 2.0;  // Normalize to [0,1]
+        shift_prob *= (1.0 - tradition * 0.5);  // 50-100% based on tradition
+        
+        if (prob_dist(rng_) < shift_prob) {
+            agent.primaryLang = region.dominant_language;
+            // Partial dialect blending
+            agent.dialect = static_cast<std::uint8_t>(
+                agent.dialect * 0.7 + (region.dominant_language * 25) * 0.3
+            );
+        }
+    }
+}

@@ -77,6 +77,15 @@ struct RegionalEconomy {
     int transition_pressure_ticks = 0;    // How many ticks sustained pressure for change
     static constexpr int TRANSITION_THRESHOLD = 50;  // ~5 years of sustained pressure needed
     
+    // Institutional path dependence (makes established systems harder to change)
+    double institutional_inertia = 0.5;   // 0.0 = easy to change, 1.0 = locked in
+    std::uint32_t years_in_current_system = 0;  // Time since last system change
+    
+    // Language dynamics (prestige-based language spread)
+    std::array<double, 4> language_prestige{0.25, 0.25, 0.25, 0.25};  // Prestige per language family
+    std::uint8_t dominant_language = 0;    // Most prestigious language in region
+    double linguistic_diversity = 1.0;     // Simpson's diversity index (0=monoculture, 1=diverse)
+    
     // Tech multipliers (from Tech module, Phase 2.7)
     std::array<double, kGoodTypes> tech_multipliers = {1.0, 1.0, 1.0, 1.0, 1.0};
     

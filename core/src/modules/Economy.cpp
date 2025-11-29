@@ -8,10 +8,25 @@
 #include <cctype>
 #include <iostream>
 #include <memory>
+#include <functional>
+#include <thread>
+#include <atomic>
 
 // Thread-local RNG for parallel operations (prevents race conditions)
+// Uses a combination of random_device + thread ID + global counter for unique seeding
 namespace {
-    thread_local std::mt19937_64 tl_rng{std::random_device{}()};
+    std::atomic<uint64_t> global_seed_counter_econ{0};
+    
+    uint64_t generateThreadSeedEcon() {
+        std::random_device rd;
+        uint64_t base = rd();
+        uint64_t thread_component = static_cast<uint64_t>(
+            std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        uint64_t counter = global_seed_counter_econ.fetch_add(1, std::memory_order_relaxed);
+        return base ^ (thread_component * 0x9e3779b97f4a7c15ULL) ^ (counter * 0xbf58476d1ce4e5b9ULL);
+    }
+    
+    thread_local std::mt19937_64 tl_rng{generateThreadSeedEcon()};
     
     std::mt19937_64& getThreadLocalRNG() {
         return tl_rng;
@@ -790,10 +805,19 @@ void Economy::evolveEconomicSystems(const std::vector<std::array<double, 4>>& re
         auto& region = regions_[i];
         const auto& beliefs = region_belief_centroids[i];
         
+        // INCREMENT YEARS IN CURRENT SYSTEM (path dependence tracking)
+        region.years_in_current_system++;
+        
+        // INSTITUTIONAL INERTIA: Increases over time (path dependence)
+        // Long-established systems become harder to change
+        double time_lock = std::min(0.3, region.years_in_current_system * 0.005);  // Cap at 30% from time
+        region.institutional_inertia = std::min(0.9, 
+            region.institutional_inertia * 0.99 + time_lock);
+        
         std::string ideal_system = determineEconomicSystem(beliefs, region.development, 
                                                            region.hardship, region.inequality);
         
-        // EMERGENT SYSTEM TRANSITION WITH HYSTERESIS
+        // EMERGENT SYSTEM TRANSITION WITH HYSTERESIS AND PATH DEPENDENCE
         // Systems require sustained pressure over multiple ticks to change
         // This prevents thrashing between systems in crisis regions
         if (region.economic_system != ideal_system) {
@@ -806,21 +830,32 @@ void Economy::evolveEconomicSystems(const std::vector<std::array<double, 4>>& re
                 double inequality_pressure = std::max(0.0, (region.inequality - 0.4) * 0.3);
                 double total_pressure = hardship_pressure + prosperity_pressure + instability_pressure + inequality_pressure;
                 
+                // APPLY INSTITUTIONAL INERTIA: Established systems resist change
+                double inertia_factor = 1.0 - region.institutional_inertia;
+                double adjusted_pressure = total_pressure * inertia_factor;
+                
                 // Pressure threshold determines how fast we accumulate transition ticks
-                // High pressure = faster accumulation, low pressure = slower
-                int pressure_increment = (total_pressure > 0.5) ? 2 : 
-                                        (total_pressure > 0.2) ? 1 : 0;
+                int pressure_increment = (adjusted_pressure > 0.5) ? 2 : 
+                                        (adjusted_pressure > 0.2) ? 1 : 0;
                 region.transition_pressure_ticks += pressure_increment;
                 
                 // Stability degrades during transition pressure
-                region.system_stability = std::max(0.2, region.system_stability - 0.01 * total_pressure);
+                region.system_stability = std::max(0.2, region.system_stability - 0.01 * adjusted_pressure);
+                
+                // DYNAMIC TRANSITION THRESHOLD: Entrenched systems need more sustained pressure
+                int required_ticks = static_cast<int>(
+                    RegionalEconomy::TRANSITION_THRESHOLD + region.years_in_current_system * 0.5
+                );
+                required_ticks = std::min(required_ticks, 200);  // Cap at 200 ticks (~20 years)
                 
                 // Check if we've reached the threshold for transition
-                if (region.transition_pressure_ticks >= RegionalEconomy::TRANSITION_THRESHOLD) {
-                    // Transition happens!
+                if (region.transition_pressure_ticks >= required_ticks) {
+                    // Transition happens! This is a major disruption
                     region.economic_system = ideal_system;
                     region.pending_system = "";
                     region.transition_pressure_ticks = 0;
+                    region.years_in_current_system = 0;  // Reset: new system
+                    region.institutional_inertia *= 0.5;  // Disruption reduces inertia
                     region.system_stability = 0.3;  // New systems start unstable
                     
                     // Log the system change (if event logging available)
@@ -828,13 +863,22 @@ void Economy::evolveEconomicSystems(const std::vector<std::array<double, 4>>& re
                 }
             } else {
                 // Different pressure direction - reset and start new accumulation
+                // But pressure relief is slowed by inertia (system resists even oscillation)
                 region.pending_system = ideal_system;
-                region.transition_pressure_ticks = 1;
+                region.transition_pressure_ticks = static_cast<int>(
+                    region.transition_pressure_ticks * (0.9 + region.institutional_inertia * 0.08)
+                );
+                if (region.transition_pressure_ticks < 1) {
+                    region.transition_pressure_ticks = 1;
+                }
             }
         } else {
             // System matches ideal - no pressure, recover stability
             region.pending_system = "";
-            region.transition_pressure_ticks = 0;
+            // Pressure decay is also affected by inertia (stable systems shed pressure slowly)
+            region.transition_pressure_ticks = static_cast<int>(
+                region.transition_pressure_ticks * (0.8 + region.institutional_inertia * 0.15)
+            );
             region.system_stability = std::min(1.0, region.system_stability + 0.02);
         }
         

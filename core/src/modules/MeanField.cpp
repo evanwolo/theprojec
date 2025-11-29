@@ -66,3 +66,32 @@ double MeanFieldApproximation::getFieldStrength(std::uint32_t region) const {
     if (region >= num_regions_) return 0.0;
     return field_strengths_[region];
 }
+
+std::array<double, 4> MeanFieldApproximation::getBlendedInfluence(
+    const NeighborInfluence& neighbors,
+    std::uint32_t region,
+    double neighbor_weight
+) const {
+    std::array<double, 4> result{0.0, 0.0, 0.0, 0.0};
+    
+    const auto& field = getRegionalField(region);
+    double field_strength = getFieldStrength(region);
+    double regional_weight = 1.0 - neighbor_weight;
+    
+    if (neighbors.neighbor_count > 0 && neighbors.total_weight > 0.0) {
+        // Blend neighbor average with regional field
+        for (int i = 0; i < 4; ++i) {
+            double neighbor_avg = neighbors.belief_sum[i] / neighbors.total_weight;
+            result[i] = neighbor_weight * neighbor_avg + 
+                       regional_weight * field[i] * field_strength;
+        }
+    } else {
+        // Isolated agents: weaker regional field influence only
+        // This prevents over-homogenization of isolated migrants
+        for (int i = 0; i < 4; ++i) {
+            result[i] = field[i] * field_strength * 0.5;
+        }
+    }
+    
+    return result;
+}

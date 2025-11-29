@@ -183,6 +183,13 @@ private:
     // Language assignment based on region geography
     void assignLanguagesByGeography();
     
+    // Language dynamics: prestige-based language shift
+    void updateLanguageDynamics();
+    
+    // Network reconnection for isolated agents (prevents network decay)
+    void reconnectIsolatedAgents();
+    void formLocalConnections(std::size_t agent_idx, int max_new_connections = 3);
+    
     // Incremental regional aggregates (avoids O(N) recomputation)
     void updateRegionalAggregates();
     void onAgentBorn(std::uint32_t agent_id);

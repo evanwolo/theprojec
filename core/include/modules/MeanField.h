@@ -8,6 +8,16 @@
 struct Agent;
 
 /**
+ * Neighbor influence accumulator for hybrid belief updates
+ * Used to blend neighbor-based and regional field influence
+ */
+struct NeighborInfluence {
+    std::array<double, 4> belief_sum{0.0, 0.0, 0.0, 0.0};
+    double total_weight{0.0};
+    int neighbor_count{0};
+};
+
+/**
  * Mean Field Approximation for Belief Updates
  * 
  * Replaces explicit neighbor iteration with regional "field" values.
@@ -39,6 +49,14 @@ public:
     
     // Get field strength (population-weighted influence)
     double getFieldStrength(std::uint32_t region) const;
+    
+    // Get blended influence combining neighbor and regional field
+    // neighbor_weight: 0.0 = pure regional field, 1.0 = pure neighbor influence
+    std::array<double, 4> getBlendedInfluence(
+        const NeighborInfluence& neighbors,
+        std::uint32_t region,
+        double neighbor_weight = 0.6
+    ) const;
     
     // Query
     const std::vector<std::array<double, 4>>& fields() const { return regional_fields_; }
