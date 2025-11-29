@@ -152,7 +152,13 @@ void Economy::update(const std::vector<std::uint32_t>& region_populations,
     if (generation % 10 == 0) {
         evolveSpecialization();
         evolveDevelopment();
-        evolveEconomicSystems(region_belief_centroids);
+        // Use dominant pole analysis when we have per-agent data
+        if (region_index != nullptr && !agents.empty()) {
+            evolveEconomicSystems(agents, *region_index);
+        } else {
+            // Fallback to mean-based analysis (legacy)
+            evolveEconomicSystems(region_belief_centroids);
+        }
     }
     
     computeProduction();
@@ -214,8 +220,8 @@ void Economy::computeInequality(const std::vector<Agent>& agents,
     for (std::size_t i = 0; i < regions_.size(); ++i) {
         if (regions_[i].population == 0) {
             regions_[i].inequality = 0.0;
-                    if (aid < agents.size()) {
-                        wealths.push_back(agents[aid].wealth);
+            continue;
+        }
         
         // Compute Gini from agent wealth distribution - this is the TRUE inequality
         // Use region_index if available for faster lookup
@@ -569,17 +575,12 @@ void Economy::distributeIncome(const std::vector<Agent>& agents,
     // Distribute income to agents based on productivity and regional economy
     // This creates wealth inequality over time
     
-                if (agent_id < agents.size()) {
-                    region_total_productivity += agents[agent_id].productivity;
-                }
-            }
-            
-            if (region_total_productivity == 0.0) {
-                // All agents in region have zero productivity
-                for (auto agent_id : agent_ids) {
-                    if (agent_id < agents.size()) {
-                        agents[agent_id].income = 0.0;
-                        agents[agent_id].hardship = 1.0;
+    if (region_index != nullptr) {
+        // OPTIMIZED PATH: Use region_index for O(N) with locality
+        for (std::size_t i = 0; i < regions_.size() && i < region_index->size(); ++i) {
+            auto& region = regions_[i];
+            const auto& agent_ids = (*region_index)[i];
+            if (agent_ids.empty()) continue;
             
             // Compute total productivity for this region (one pass over region's agents)
             double region_total_productivity = 0.0;
@@ -718,7 +719,7 @@ void Economy::distributeIncome(const std::vector<Agent>& agents,
             
             if (region_id >= regions_.size()) {
                 throw std::runtime_error("Invalid agent.region in distributeIncome: " + 
-                ? (std::accumulate(region.production.begin(), region.production.end(), 0.0) / region.population) : 1.0;
+                                       std::to_string(region_id) +
                                        " (must be < " + std::to_string(regions_.size()) + ")");
             }
             
@@ -808,12 +809,8 @@ void Economy::distributeIncome(const std::vector<Agent>& agents,
             double essential_cost = region.prices[FOOD] * 0.7 + region.prices[ENERGY] * 0.35;
             double consumption_capacity = agent.income / essential_cost;
             agent.hardship = (consumption_capacity < 1.0) ? (1.0 - consumption_capacity) : 0.0;
-                int pressure_increment = 0;
-                if (total_pressure > 0.5) {
-                    pressure_increment = 2;
-                } else if (total_pressure > 0.2) {
-                    pressure_increment = 1;
-                }
+            agent.hardship = std::clamp(agent.hardship, 0.0, 1.0);
+        }
         
         // Third pass: Update regional wealth distribution metrics
         for (std::size_t r = 0; r < regions_.size(); ++r) {
@@ -857,6 +854,87 @@ void Economy::evolveDevelopment() {
         
         region.development = std::max(0.0, std::min(10.0, region.development));
     }
+}
+
+RegionalBeliefProfile Economy::analyzeRegionalBeliefs(
+    uint32_t region_id,
+    const std::vector<Agent>& agents,
+    const std::vector<std::vector<std::uint32_t>>& region_index) const {
+    
+    RegionalBeliefProfile profile;
+    
+    const auto& agent_indices = region_index[region_id];
+    if (agent_indices.empty()) {
+        return profile;  // Return zero-initialized profile
+    }
+    
+    // Pass 1: Compute means
+    for (std::uint32_t idx : agent_indices) {
+        const auto& agent = agents[idx];
+        for (int d = 0; d < 4; ++d) {
+            profile.mean[d] += agent.B[d];
+        }
+    }
+    double n = static_cast<double>(agent_indices.size());
+    for (int d = 0; d < 4; ++d) {
+        profile.mean[d] /= n;
+    }
+    
+    // Pass 2: Compute variance and track positive/negative faction sizes
+    std::array<double, 4> sum_sq{0,0,0,0};
+    std::array<int, 4> pos_count{0,0,0,0};
+    std::array<int, 4> neg_count{0,0,0,0};
+    std::array<double, 4> pos_sum{0,0,0,0};
+    std::array<double, 4> neg_sum{0,0,0,0};
+    
+    for (std::uint32_t idx : agent_indices) {
+        const auto& agent = agents[idx];
+        for (int d = 0; d < 4; ++d) {
+            double diff = agent.B[d] - profile.mean[d];
+            sum_sq[d] += diff * diff;
+            
+            // Track positive and negative believers separately
+            if (agent.B[d] > 0.1) {
+                pos_count[d]++;
+                pos_sum[d] += agent.B[d];
+            } else if (agent.B[d] < -0.1) {
+                neg_count[d]++;
+                neg_sum[d] += agent.B[d];
+            }
+        }
+    }
+    
+    // Compute variance and dominant pole for each dimension
+    for (int d = 0; d < 4; ++d) {
+        profile.variance[d] = sum_sq[d] / n;
+        
+        // Determine dominant pole: which faction is larger and more intense?
+        // Use faction size weighted by average intensity
+        double pos_weight = (pos_count[d] > 0) 
+            ? pos_count[d] * (pos_sum[d] / pos_count[d])  // count * avg intensity
+            : 0.0;
+        double neg_weight = (neg_count[d] > 0)
+            ? neg_count[d] * std::abs(neg_sum[d] / neg_count[d])  // count * avg |intensity|
+            : 0.0;
+        
+        // Dominant pole is the direction of the stronger faction
+        if (pos_weight > neg_weight * 1.2) {
+            // Positive faction dominates - use positive average
+            profile.dominant_pole[d] = (pos_count[d] > 0) ? pos_sum[d] / pos_count[d] : 0.0;
+        } else if (neg_weight > pos_weight * 1.2) {
+            // Negative faction dominates - use negative average
+            profile.dominant_pole[d] = (neg_count[d] > 0) ? neg_sum[d] / neg_count[d] : 0.0;
+        } else {
+            // Neither dominates (within 20%) - truly contested, use 0
+            profile.dominant_pole[d] = 0.0;
+        }
+    }
+    
+    // Overall polarization is average variance across dimensions
+    profile.polarization = (profile.variance[0] + profile.variance[1] + 
+                           profile.variance[2] + profile.variance[3]) / 4.0;
+    
+    return profile;
 }
 
 void Economy::evolveEconomicSystems(const std::vector<std::array<double, 4>>& region_belief_centroids) {
@@ -977,6 +1055,110 @@ void Economy::evolveEconomicSystems(const std::vector<std::array<double, 4>>& re
         
         // NOTE: Inequality is computed separately in computeInequality() from actual agent wealth
         // No hardcoded inequality values here - it's fully emergent!
+    }
+}
+
+void Economy::evolveEconomicSystems(
+    const std::vector<Agent>& agents,
+    const std::vector<std::vector<std::uint32_t>>& region_index) {
+    
+    if (forced_model_ != "") {
+        // Global policy override
+        for (auto& region : regions_) {
+            region.economic_system = forced_model_;
+            region.system_stability = 0.5;  // forced systems less stable
+        }
+        return;
+    }
+    
+    // Economic systems emerge from beliefs + material conditions
+    // Now using DOMINANT POLE analysis for differentiated outcomes
+    for (std::size_t i = 0; i < regions_.size(); ++i) {
+        auto& region = regions_[i];
+        
+        // Analyze regional beliefs with dominant pole detection
+        RegionalBeliefProfile profile = analyzeRegionalBeliefs(
+            static_cast<uint32_t>(i), agents, region_index);
+        
+        // INCREMENT YEARS IN CURRENT SYSTEM (path dependence tracking)
+        region.years_in_current_system++;
+        
+        // INSTITUTIONAL INERTIA: Increases over time (path dependence)
+        double time_lock = std::min(0.3, region.years_in_current_system * 0.005);
+        region.institutional_inertia = std::min(0.9, 
+            region.institutional_inertia * 0.99 + time_lock);
+        
+        // Use dominant pole for system determination - NOT mean!
+        std::string ideal_system = determineEconomicSystem(profile, region.development, 
+                                                           region.hardship, region.inequality);
+        
+        // EMERGENT SYSTEM TRANSITION WITH HYSTERESIS AND PATH DEPENDENCE
+        if (region.economic_system != ideal_system) {
+            if (region.pending_system == ideal_system) {
+                double hardship_pressure = std::max(0.0, (region.hardship - 0.3) * 0.5);
+                double prosperity_pressure = std::max(0.0, (region.welfare - 0.8) * 0.3);
+                double instability_pressure = (1.0 - region.system_stability) * 0.2;
+                double inequality_pressure = std::max(0.0, (region.inequality - 0.4) * 0.3);
+                double total_pressure = hardship_pressure + prosperity_pressure + instability_pressure + inequality_pressure;
+                
+                double inertia_factor = 1.0 - region.institutional_inertia;
+                double adjusted_pressure = total_pressure * inertia_factor;
+                
+                int pressure_increment = (adjusted_pressure > 0.5) ? 2 : 
+                                        (adjusted_pressure > 0.2) ? 1 : 0;
+                region.transition_pressure_ticks += pressure_increment;
+                
+                region.system_stability = std::max(0.2, region.system_stability - 0.01 * adjusted_pressure);
+                
+                int required_ticks = static_cast<int>(
+                    RegionalEconomy::TRANSITION_THRESHOLD + region.years_in_current_system * 0.5
+                );
+                required_ticks = std::min(required_ticks, 200);
+                
+                if (region.transition_pressure_ticks >= required_ticks) {
+                    region.economic_system = ideal_system;
+                    region.pending_system = "";
+                    region.transition_pressure_ticks = 0;
+                    region.years_in_current_system = 0;
+                    region.institutional_inertia *= 0.5;
+                    region.system_stability = 0.3;
+                }
+            } else {
+                region.pending_system = ideal_system;
+                region.transition_pressure_ticks = static_cast<int>(
+                    region.transition_pressure_ticks * (0.9 + region.institutional_inertia * 0.08)
+                );
+                if (region.transition_pressure_ticks < 1) {
+                    region.transition_pressure_ticks = 1;
+                }
+            }
+        } else {
+            region.pending_system = "";
+            region.transition_pressure_ticks = static_cast<int>(
+                region.transition_pressure_ticks * (0.8 + region.institutional_inertia * 0.15)
+            );
+            region.system_stability = std::min(1.0, region.system_stability + 0.02);
+        }
+        
+        // EMERGENT EFFICIENCY
+        double production_total = 0.0;
+        double consumption_total = 0.0;
+        for (int g = 0; g < kGoodTypes; ++g) {
+            production_total += region.production[g];
+            consumption_total += region.consumption[g];
+        }
+        
+        double production_efficiency = (consumption_total > 0) 
+            ? std::min(1.0, production_total / (consumption_total + 1.0))
+            : 0.5;
+        
+        double stability_bonus = region.system_stability * 0.2;
+        double development_bonus = std::min(0.2, region.development * 0.04);
+        
+        region.efficiency = std::clamp(
+            0.5 + production_efficiency * 0.3 + stability_bonus + development_bonus,
+            0.3, 1.0
+        );
     }
 }
 
@@ -1145,6 +1327,83 @@ std::string Economy::determineEconomicSystem(const std::array<double, 4>& belief
     return "mixed";
 }
 
+std::string Economy::determineEconomicSystem(const RegionalBeliefProfile& profile,
+                                             double development,
+                                             double hardship,
+                                             double inequality) const {
+    // NEW: Use DOMINANT POLE instead of mean for system determination
+    // This prevents averaging cancellation where opposing factions neutralize each other
+    // Instead, the dominant faction's beliefs drive system selection
+    
+    // Belief axes: [0]=Authority, [1]=Tradition, [2]=Hierarchy, [3]=Faith
+    // Negative = (Liberty, Progress, Equality, Rationalism)
+    
+    double authority = profile.dominant_pole[0];
+    double tradition = profile.dominant_pole[1];
+    double hierarchy = profile.dominant_pole[2];
+    
+    // ADJUSTED THRESHOLDS: Match actual simulation development range (0.5-1.0)
+    // Previously required development > 1.2 which was unrealistic
+    
+    // Low development → feudal or cooperative (subsistence economies)
+    if (development < 0.4) {
+        if (hierarchy > 0.1 && authority > 0.05) {
+            return "feudal";  // traditional hierarchy
+        } else if (hierarchy < -0.05) {
+            return "cooperative";  // communal subsistence
+        }
+    }
+    
+    // Crisis conditions → revolutionary pressure
+    if (hardship > 0.35 && inequality > 0.45) {
+        if (hierarchy < -0.05) {  // egalitarian beliefs
+            return "planned";  // equality-seeking planned economy
+        } else if (authority > 0.05) {
+            return "feudal";  // strongman restoration
+        }
+    }
+    
+    // Highly polarized regions → system determined by stronger faction
+    // This is where dominant pole really shines - contested areas have clear winners
+    if (profile.polarization > 0.05) {
+        // Polarized: use the dominant pole directly with LOWER thresholds
+        if (development > 0.8 && authority < -0.1 && hierarchy < -0.1) {
+            return "cooperative";
+        }
+        if (development > 0.5 && authority < -0.05 && hierarchy > 0.02) {
+            return "market";
+        }
+        if (development > 0.5 && authority > 0.1 && hierarchy < 0.05) {
+            return "planned";
+        }
+        if (hierarchy > 0.12 && authority > 0.08) {
+            return "feudal";
+        }
+    }
+    
+    // Developed + liberty + equality → cooperative/social democracy
+    if (development > 0.8 && authority < -0.1 && hierarchy < -0.1) {
+        return "cooperative";
+    }
+    
+    // Developed + liberty + accepts hierarchy → market capitalism  
+    if (development > 0.5 && authority < -0.05 && hierarchy > 0.02) {
+        return "market";
+    }
+    
+    // Developed + authority + equality-leaning → planned economy
+    if (development > 0.5 && authority > 0.1 && hierarchy < 0.05) {
+        return "planned";
+    }
+    
+    // Traditional + hierarchical → feudal remnants
+    if (tradition > 0.1 && hierarchy > 0.12 && development < 0.7) {
+        return "feudal";
+    }
+    
+    // Default: mixed economy (only for truly contested regions with no dominant pole)
+    return "mixed";
+}
 
 
 double Economy::computeRegionGini(std::uint32_t region_id, const std::vector<Agent>& agents) const {

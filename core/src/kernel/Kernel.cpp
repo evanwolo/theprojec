@@ -221,7 +221,12 @@ void Kernel::buildSmallWorld() {
                     if (++attempts > maxAttempts) break;
                 } while (newJ == i || current.count(newJ));
                 
-                if (attempts > maxAttempts) continue;
+                if (attempts > maxAttempts) {
+                    // NOTE: This triggers when network is too dense for random rewiring.
+                    // Creates slight bias toward existing topology. Acceptable for small-world
+                    // properties but may affect long-run dynamics in very dense networks.
+                    continue;
+                }
                 
                 // Remove old edge from both sides
                 auto& niNbrs = agents_[i].neighbors;
@@ -378,14 +383,15 @@ void Kernel::updateBeliefs() {
                 double similarity = (norm_a > 1e-9 && norm_n > 1e-9) ?
                     dot / (std::sqrt(norm_a) * std::sqrt(norm_n)) : 0.0;
                 
-                // EXPONENTIAL weighting: e^(similarity * 2.5) gives range 0.08-12.2
+                // EXPONENTIAL weighting: e^(similarity * kHomophilyExponent)
                 // This creates STRONG echo chambers - similar agents dominate influence
-                double weight = std::exp(similarity * 2.5);
-                weight = std::clamp(weight, 0.1, 10.0);  // Prevent numerical issues
+                double weight = std::exp(similarity * TuningConstants::kHomophilyExponent);
+                weight = std::clamp(weight, TuningConstants::kHomophilyMinWeight, 
+                                   TuningConstants::kHomophilyMaxWeight);
                 
                 // Language bonus: shared language strengthens influence
                 if (neighbor.primaryLang == agent.primaryLang) {
-                    weight *= 1.5;
+                    weight *= TuningConstants::kLanguageBonusMultiplier;
                 }
                 
                 // Accumulate weighted beliefs
@@ -407,13 +413,14 @@ void Kernel::updateBeliefs() {
             
             // Thread-local RNG for innovation noise
             auto& rng = getThreadLocalRNG();
-            std::normal_distribution<double> noise_dist(0.0, 0.03);  // Increased innovation noise
+            std::normal_distribution<double> noise_dist(0.0, TuningConstants::kInnovationNoise);
             
             // Calculate neighbor weight based on conformity and network size
             // HIGH neighbor weight = rely on close network (echo chambers)
             // LOW neighbor weight = follow regional mainstream
             // Non-conformists form subcultures; conformists follow the crowd
-            double neighbor_weight = 0.85 - agent.conformity * 0.35;  // 0.5-0.85
+            double neighbor_weight = TuningConstants::kNeighborWeightMax 
+                                   - agent.conformity * (TuningConstants::kNeighborWeightMax - TuningConstants::kNeighborWeightMin);
             
             // Isolated agents (few neighbors) must rely more on regional field
             if (neighbor_influences[i].neighbor_count < 2) {
@@ -428,8 +435,10 @@ void Kernel::updateBeliefs() {
             
             // BELIEF ANCHORING: Agents resist changing core beliefs
             // Based on age (older = more set in ways) and assertiveness (confident = resistant)
-            double age_factor = std::min(1.0, agent.age / 50.0);  // Maxes out at 50
-            double anchoring = 0.3 + age_factor * 0.4 + agent.assertiveness * 0.2;  // 0.3-0.9
+            double age_factor = std::min(1.0, agent.age / TuningConstants::kAnchoringMaxAge);
+            double anchoring = TuningConstants::kAnchoringBase 
+                             + age_factor * TuningConstants::kAnchoringAgeWeight 
+                             + agent.assertiveness * TuningConstants::kAnchoringAssertWeight;
             
             // Update beliefs toward social influence (with resistance)
             double adapt_rate = stepSize * agent.m_comm * agent.m_susceptibility;
@@ -591,13 +600,13 @@ void Kernel::step() {
             // but the direction depends on personality, not predetermined mappings
             
             // Base pressure is very small - beliefs change slowly
-            double base_pressure = 0.0005;
+            double base_pressure = TuningConstants::kBasePressureMultiplier * 0.01;  // ~0.0005
             
             // Openness determines how much economic experience affects beliefs
             double experience_weight = agent.openness * base_pressure;
             
             // Personal hardship creates pressure for SOME change, direction varies by personality
-            if (agent_econ.hardship > 0.3) {
+            if (agent_econ.hardship > TuningConstants::kHardshipThreshold) {
                 double hardship_pressure = experience_weight * agent_econ.hardship;
                 
                 // High conformity → blame self/accept system, low conformity → blame system
@@ -624,14 +633,19 @@ void Kernel::step() {
             // NOTE: Most agents (moderate traits) have no systematic wealth→belief pressure
             
             // Regional conditions create shared experiences, but response varies
-            if (regional_econ.welfare < 0.5 && agent.openness > 0.6) {
+            if (regional_econ.welfare < TuningConstants::kWelfareThreshold && agent.openness > 0.6) {
                 // Low welfare + high openness → open to change (progress over tradition)
-                agent.B[1] -= experience_weight * (0.5 - regional_econ.welfare);
+                agent.B[1] -= experience_weight * (TuningConstants::kWelfareThreshold - regional_econ.welfare);
             }
             
-            // NO SYSTEM-BASED BELIEF FORCING
-            // Economic systems don't automatically push beliefs in predetermined directions
-            // Beliefs shaped by actual experiences, social influence, and personality
+            // NOTE ON BELIEF FORCING:
+            // Economic EXPERIENCES (hardship, relative wealth, welfare) DO influence beliefs above,
+            // but the influence is PERSONALITY-MODULATED, not deterministic:
+            // - Conformity determines direction of hardship response (accept vs. reject authority)
+            // - Openness determines magnitude of all experience effects
+            // - Assertiveness determines wealth-inequality response
+            // The economic SYSTEM LABEL (market/planned/etc.) does NOT force beliefs.
+            // Systems emerge FROM beliefs; beliefs shift from lived experiences + social influence.
             
             // Keep beliefs in [-1, 1] range
             for (int d = 0; d < 4; ++d) {
@@ -1056,7 +1070,15 @@ void Kernel::createChild(std::uint32_t motherId) {
 }
 
 void Kernel::compactDeadAgents() {
-    // Remove dead agents from regionIndex
+    // AGENT ID STABILITY CONSTRAINT:
+    // This function marks dead agents as inactive but does NOT remove them from agents_ vector.
+    // Agent IDs are indices into agents_, and neighbor lists store these IDs directly.
+    // If we ever actually erase agents from the vector, all IDs would become invalid.
+    // Current approach: agents_ is append-only, dead slots are skipped but preserved.
+    // This wastes memory but preserves ID stability across the simulation.
+    // TODO: If memory becomes an issue, implement ID remapping for neighbor lists.
+    
+    // Remove dead agents from regionIndex (these are just ID references)
     for (auto& region : regionIndex_) {
         region.erase(
             std::remove_if(region.begin(), region.end(), 
@@ -1095,13 +1117,13 @@ void Kernel::stepMigration() {
             
             // Attractiveness = welfare - hardship + development - crowding
             double welfare_pull = regional_econ.welfare;
-            double hardship_push = -regional_econ.hardship * 2.0;  // Hardship is strong push
+            double hardship_push = -regional_econ.hardship * TuningConstants::kHardshipPushWeight;
             double development_pull = regional_econ.development * 0.2;
             
             // Crowding penalty (reduces attractiveness when over capacity)
             double crowding = 0.0;
             if (pop > cfg_.regionCapacity) {
-                crowding = -(pop / cfg_.regionCapacity - 1.0) * 0.5;
+                crowding = -(pop / cfg_.regionCapacity - 1.0) * TuningConstants::kCrowdingPenaltyWeight;
             }
             
             region_attractiveness_[r] = welfare_pull + hardship_push + development_pull + crowding;
@@ -1487,11 +1509,14 @@ void Kernel::updateRegionalAggregates() {
 // ============================================================================
 
 void Kernel::reconnectIsolatedAgents() {
-    // Run every 5 ticks for faster network recovery (called from step())
-    if (generation_ % 5 != 0) return;
+    // Run periodically for network recovery (called from step())
+    // NOTE: This function is intentionally NOT parallelized because formLocalConnections
+    // modifies shared state (neighbor lists). Sequential execution ensures thread safety.
+    if (generation_ % TuningConstants::kReconnectInterval != 0) return;
     
     std::size_t reconnected = 0;
-    const std::size_t max_reconnections = agents_.size() / 50; // 2% cap per tick (increased)
+    const std::size_t max_reconnections = static_cast<std::size_t>(
+        agents_.size() * TuningConstants::kReconnectCapFraction);
     
     for (std::size_t i = 0; i < agents_.size() && reconnected < max_reconnections; ++i) {
         Agent& agent = agents_[i];

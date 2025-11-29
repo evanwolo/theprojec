@@ -10,6 +10,15 @@
 #include <string>
 #include <random>
 
+// Regional belief distribution profile (captures more than just mean)
+struct RegionalBeliefProfile {
+    std::array<double, 4> mean{0, 0, 0, 0};           // Average belief
+    std::array<double, 4> variance{0, 0, 0, 0};       // Spread/disagreement
+    std::array<double, 4> dominant_pole{0, 0, 0, 0};  // Which extreme is stronger (signed)
+    double polarization = 0.0;                        // Overall belief diversity
+    std::uint32_t population = 0;                     // Agents counted
+};
+
 // Trade link between regions with transport costs
 struct TradeLink {
     std::uint32_t from_region;
@@ -182,11 +191,26 @@ private:
                            const std::vector<std::vector<std::uint32_t>>* region_index = nullptr);
     void computeHardship();
     void evolveDevelopment();
+    // New overload using dominant pole analysis
+    void evolveEconomicSystems(const std::vector<Agent>& agents,
+                               const std::vector<std::vector<std::uint32_t>>& region_index);
+    // Legacy overload using mean-based analysis
     void evolveEconomicSystems(const std::vector<std::array<double, 4>>& region_belief_centroids);
 
     StartConditionProfile resolveStartCondition(const std::string& name) const;
     
-    // Economic system emergence
+    // Regional belief analysis (for economic system determination)
+    RegionalBeliefProfile analyzeRegionalBeliefs(
+        std::uint32_t region_id,
+        const std::vector<Agent>& agents,
+        const std::vector<std::vector<std::uint32_t>>& region_index) const;
+    
+    // Economic system emergence - NEW: uses dominant pole, not mean
+    std::string determineEconomicSystem(const RegionalBeliefProfile& profile, 
+                                       double development,
+                                       double hardship,
+                                       double inequality) const;
+    // Legacy: uses mean-based analysis
     std::string determineEconomicSystem(const std::array<double, 4>& beliefs, 
                                        double development,
                                        double hardship,

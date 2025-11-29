@@ -12,6 +12,44 @@
 #include "modules/MeanField.h"
 #include "utils/EventLog.h"
 
+// ---------- Tuning Constants ----------
+// These constants control emergent behavior dynamics and have been empirically tuned.
+// Changing these affects simulation outcomes - document rationale for any changes.
+namespace TuningConstants {
+    // Belief dynamics
+    constexpr double kHomophilyExponent = 2.5;       // Exponential homophily strength (exp(sim * this))
+    constexpr double kHomophilyMinWeight = 0.1;     // Minimum neighbor influence weight
+    constexpr double kHomophilyMaxWeight = 10.0;    // Maximum neighbor influence weight
+    constexpr double kLanguageBonusMultiplier = 1.5; // Shared language influence bonus
+    constexpr double kInnovationNoise = 0.03;       // Belief innovation std dev
+    
+    // Belief anchoring (age-based resistance to change)
+    constexpr double kAnchoringMaxAge = 50.0;       // Age at which anchoring maxes out
+    constexpr double kAnchoringBase = 0.3;          // Minimum anchoring (young agents)
+    constexpr double kAnchoringAgeWeight = 0.4;     // Age contribution to anchoring
+    constexpr double kAnchoringAssertWeight = 0.2;  // Assertiveness contribution to anchoring
+    
+    // Network dynamics
+    constexpr int kReconnectInterval = 5;           // Ticks between reconnection passes
+    constexpr double kReconnectCapFraction = 0.02;  // Max fraction of agents reconnected per tick
+    constexpr double kNeighborWeightMin = 0.5;      // Minimum neighbor influence weight (vs regional)
+    constexpr double kNeighborWeightMax = 0.85;     // Maximum neighbor influence weight (vs regional)
+    
+    // Demography
+    constexpr double kAgeShiftBase = 0.6;           // Base age shift for belief inheritance
+    constexpr double kAgeShiftMaxBonus = 0.4;       // Max bonus from age
+    constexpr double kAgeShiftNormalizer = 25.0;    // Age normalization factor
+    
+    // Migration
+    constexpr double kHardshipPushWeight = 2.0;     // Hardship contribution to push factor
+    constexpr double kCrowdingPenaltyWeight = 0.5;  // Over-capacity crowding penalty
+    
+    // Economic experience → belief pressure
+    constexpr double kBasePressureMultiplier = 0.05; // Base pressure from economic experience
+    constexpr double kHardshipThreshold = 0.3;       // Hardship level that triggers belief response
+    constexpr double kWelfareThreshold = 0.5;        // Welfare level that triggers openness response
+}
+
 // ---------- Configuration ----------
 struct KernelConfig {
     std::uint32_t population = 50000;
